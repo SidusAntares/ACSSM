@@ -525,10 +525,10 @@ def load_data_timematch(config):
     print('Using classes:', source_classes)
     config.classes = source_classes
     config.num_classes = len(source_classes)
-    indices = {config.source: int(0.05*len(source_data)),
-               config.target: int(0.1*len(PixelSetData(config.data_root, config.target, source_classes)))}
-    # indices = {config.source: len(source_data),
-    #            config.target: len(PixelSetData(config.data_root, config.target, source_classes))}
+    # indices = {config.source: int(0.05*len(source_data)),
+    #            config.target: int(0.1*len(PixelSetData(config.data_root, config.target, source_classes)))}
+    indices = {config.source: len(source_data),
+               config.target: len(PixelSetData(config.data_root, config.target, source_classes))}
     folds = create_train_val_test_folds([config.source, config.target], config.num_folds, indices, config.val_ratio,
                                         config.test_ratio)
     splits = folds[0]
