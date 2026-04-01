@@ -86,6 +86,22 @@ class Transformer_Encoder(nn.Module):
                                          nn.ReLU(),
                                          nn.LayerNorm(width),
                                          nn.Linear(width, width))
+        elif args.dataset == 'timematch':
+            # TimeMatch: 10 spectral bands + mask → 2 * 10 = 20
+            obs_embedder = nn.Sequential(
+                nn.Linear(2 * 10, width),
+                nn.ReLU(),
+                nn.LayerNorm(width),
+                nn.Linear(width, width),
+                nn.ReLU(),
+                nn.LayerNorm(width),
+                nn.Linear(width, width),
+                nn.ReLU(),
+                nn.LayerNorm(width),
+                nn.Linear(width, width)
+            )
+        else:
+            raise ValueError(f"Unsupported dataset: {args.dataset}")
                     
         # OPTIONAL recurrent layer, this sometimes helps
         self.encoder = Encoder(args, width, device, obs_embedder)
@@ -182,7 +198,14 @@ class Decoder(nn.Module):
             
         elif self.dataset == 'person_activity':
             self.decoder = nn.Sequential(
-                                         nn.Linear(self.ld, self.od),)           
+                                         nn.Linear(self.ld, self.od),)
+        elif self.dataset == 'timematch':
+            # TimeMatch 是分类任务，输出维度 = num_classes
+            self.decoder = nn.Sequential(
+                nn.Linear(self.ld, self.ld),
+                nn.ReLU(),
+                nn.Linear(self.ld, self.od)  # od = num_classes
+            )
     def forward(self, input):
         
         if self.dataset == 'pendulum' and self.task == 'interpolation':

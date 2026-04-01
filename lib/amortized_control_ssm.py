@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import wandb
 import torch
@@ -50,6 +51,15 @@ class ACSSM():
                     obs_valid = torch.ones(b, t).to(obs.device)
                     mask_obs = None
                     mask_truth = None
+                elif self.dataset == 'timematch':
+                    obs = data['inp_obs'].to(self.device)
+                    truth = data['evd_obs'].to(self.device)
+                    obs_times = data['inp_tid'].to(self.device)
+                    labels = data['aux_obs'].to(self.device)
+                    truth = truth.to(self.device).to(torch.float32)
+                    obs_valid = data['obs_valid'].to(self.device)
+                    mask_truth = data['mask_truth'].to(self.device)
+                    mask_obs = data['mask_obs'].to(self.device)
                 else:
                     obs, truth, obs_valid, obs_times, mask_truth, mask_obs = [j.to(self.device).to(torch.float32) for j in data]
                     if self.task == 'extrapolation':
@@ -144,6 +154,15 @@ class ACSSM():
                 obs_valid = torch.ones(b, t).to(obs.device)
                 mask_obs = None
                 mask_truth = None
+            elif self.dataset == 'timematch':
+                obs = data['inp_obs'].to(self.device)
+                truth = data['evd_obs'].to(self.device)
+                obs_times = data['inp_tid'].to(self.device)
+                labels = data['aux_obs'].to(self.device)
+                truth = truth.to(self.device).to(torch.float32)
+                obs_valid = data['obs_valid'].to(self.device)
+                mask_truth = data['mask_truth'].to(self.device)
+                mask_obs = data['mask_obs'].to(self.device)
             else:
                 obs, truth, obs_valid, obs_times, mask_truth, mask_obs = [j.to(self.device).to(torch.float32) for j in data]
                 if self.task == 'extrapolation':

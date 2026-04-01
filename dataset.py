@@ -19,7 +19,7 @@ from transforms import (
     ToTensor,
 )
 from timematch_utils import label_utils
-
+import sys
 
 class PixelSetData(data.Dataset):
     def __init__(
@@ -51,6 +51,7 @@ class PixelSetData(data.Dataset):
 
         self.dates = self.metadata["dates"]
         self.date_positions = self.days_after(self.metadata["start_date"], self.dates)
+        self.date_positions = [pos + 1 for pos in self.date_positions]
         self.date_indices = np.arange(len(self.date_positions))
 
     def get_shapes(self):
@@ -83,7 +84,26 @@ class PixelSetData(data.Dataset):
         if self.transform is not None:
             sample = self.transform(sample)
 
-        return sample
+        T, C, N = sample["pixels"].shape
+        assert N==1 ,"num_pixels must be 1, so that loss could be calculate normally"
+        sample["pixels"] = sample["pixels"].squeeze(-1)
+        # 构造 ACSSM 需要的字典（模仿 person_activity）
+        acssm_sample = {
+            'inp_obs': torch.as_tensor(sample['pixels'], dtype=torch.float32),  # [T, C] 输入观测
+            'evd_obs': torch.as_tensor(sample['pixels'], dtype=torch.float32),  # dummy target 重建目标用于计算loss
+            'inp_tid': torch.as_tensor(sample['positions'], dtype=torch.float32),  # [T]
+            'aux_obs': torch.full((T,), sample['label'], dtype=torch.long),  # scalar label
+            'obs_valid': torch.ones(T, dtype=torch.bool),  # [T]
+            'mask_obs': torch.ones(T, C, dtype=torch.bool),  # [T, C]
+            'mask_truth': torch.ones(T, C, dtype=torch.bool),  # [T, C]
+        }
+
+        for k, v in acssm_sample.items():
+            if torch.isnan(v).any():
+                print(f"NaN in {k} at index {index}")
+                raise ValueError("NaN detected!")
+
+        return acssm_sample
 
     def make_dataset(self, data_folder, meta_folder, class_to_idx, indices, country):
         metadata = pkl.load(open(os.path.join(meta_folder, "metadata.pkl"), "rb"))
@@ -198,7 +218,7 @@ def create_train_loader(ds, batch_size, num_workers):
     )
 
 
-def create_evaluation_loaders(dataset_name, splits, config, sample_pixels_val=True):
+def create_evaluation_loaders(dataset_name, splits, config):
     """
     Create data loaders for unsupervised domain adaptation
     """
@@ -207,8 +227,7 @@ def create_evaluation_loaders(dataset_name, splits, config, sample_pixels_val=Tr
     # Validation dataset
     val_transform = transforms.Compose(
         [
-            RandomSamplePixels(config.num_pixels) if sample_pixels_val else Identity(),
-            RandomSampleTimeSteps(config.seq_length),
+            RandomSamplePixels(config.num_pixels) ,
             RandomSampleTimeSteps(config.seq_length) if is_tsnet else Identity(),
             Normalize(),
             ToTensor(),
@@ -225,15 +244,14 @@ def create_evaluation_loaders(dataset_name, splits, config, sample_pixels_val=Tr
         val_dataset,
         num_workers=config.num_workers,
         batch_sampler=GroupByShapesBatchSampler(
-            val_dataset, config.batch_size, by_pixel_dim=not sample_pixels_val
+            val_dataset, config.batch_size, by_pixel_dim=False
         ),
     )
 
     # Test dataset
     test_transform = transforms.Compose(
         [
-            RandomSamplePixels(config.num_pixels) if sample_pixels_val else Identity(),
-            RandomSampleTimeSteps(config.seq_length),
+            RandomSamplePixels(config.num_pixels) ,
             RandomSampleTimeSteps(config.seq_length) if is_tsnet else Identity(),
             Normalize(),
             ToTensor(),
