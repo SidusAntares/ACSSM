@@ -7,6 +7,8 @@ import numpy as np
 import torch
 
 from einops import repeat, rearrange
+from sklearn.metrics import f1_score
+
 
 def CNLL_(targets, predictions):
     b = targets.size(0)
@@ -21,6 +23,33 @@ def CNLL_(targets, predictions):
     loss = torch.nn.functional.cross_entropy(predictions, targets) * b
     acc = 100 * (predictions.argmax(-1) == targets).sum()/targets.size(0) * b
     return loss, acc
+
+
+def F1_(targets, predictions, average='macro', zero_division=0):
+    # Ensure predictions is 4D: (N, B, T, C)
+    if len(predictions.shape) == 3:
+        predictions = rearrange(predictions, 'b t c -> 1 b t c')
+    elif len(predictions.shape) != 4:
+        raise ValueError(f"Expected predictions to be 3D or 4D, got {predictions.shape}")
+
+    # Repeat targets to match n_samples (N)
+    N = predictions.shape[0]
+    targets = repeat(targets, 'b t -> n b t', n=N)  # (N, B, T)
+
+    # Flatten all dimensions except class
+    flat_targets = rearrange(targets, 'n b t -> (n b t)')  # (N*B*T,)
+    flat_preds = rearrange(predictions, 'n b t c -> (n b t) c')  # (N*B*T, C)
+
+    # Get predicted class indices
+    flat_pred_labels = torch.argmax(flat_preds, dim=1)  # (N*B*T,)
+
+    # Convert to numpy for sklearn
+    y_true = flat_targets.cpu().numpy()
+    y_pred = flat_pred_labels.cpu().numpy()
+
+    # Compute F1
+    f1 = f1_score(y_true, y_pred, average=average, zero_division=zero_division)
+    return f1
 
 def BNLL_(targets, predictions, uint8_targets=False):
     """ Computes Binary Cross Entropy

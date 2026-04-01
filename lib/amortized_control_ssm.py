@@ -7,7 +7,7 @@ import torch.nn as nn
 from sklearn.metrics import f1_score
 
 import lib.sde as sde
-from lib.losses import MSE_, GNLL_, BNLL_, CNLL_
+from lib.losses import MSE_, GNLL_, BNLL_, CNLL_, F1_
 from lib.data_utils import adjust_obs_for_extrapolation
 from lib.utils import get_time
 
@@ -153,13 +153,12 @@ class ACSSM():
         epoch_mse = 0
         epoch_ll = 0
         epoch_f1 = 0
-        
+
         epoch_impute_mse = 0
         epoch_impute_ll = 0
         
         num_data = 0
-        all_pred = []
-        all_true = []
+        num_batches = 0
         for _, data in enumerate(dl):
         
             if self.dataset == 'pendulum':
@@ -184,7 +183,6 @@ class ACSSM():
                 truth = data['evd_obs'].to(self.device)
                 obs_times = data['inp_tid'].to(self.device)
                 labels = data['aux_obs'].to(self.device)
-                truth = truth.to(self.device).to(torch.float32)
                 obs_valid = data['obs_valid'].to(self.device)
                 mask_truth = data['mask_truth'].to(self.device)
                 mask_obs = data['mask_obs'].to(self.device)
@@ -202,11 +200,9 @@ class ACSSM():
                 eval_mse = MSE_(truth.flatten(start_dim=2), mean.flatten(start_dim=3), mask = mask_truth.flatten(start_dim=2)) * batch_len
             elif self.task == 'classification':
                 eval_nll, eval_mse = CNLL_(labels, mean)
-                pred_labels = torch.argmax(mean, dim=1)
-                true_labels = torch.argmax(labels, dim=1)
-                all_pred.append(pred_labels)
-                all_true.append(true_labels)
-                epoch_ll += eval_nll.item()
+                macro_f1 = F1_(labels, mean, average='macro', zero_division=0)
+                epoch_f1 += macro_f1
+                num_batches += 1
             else:
                 eval_nll = GNLL_(truth, mean, var, mask=mask_truth) * batch_len
                 eval_mse = MSE_(truth, mean, mask=mask_truth) * batch_len
@@ -229,13 +225,8 @@ class ACSSM():
                     epoch_impute_ll += impute_nll.item()
 
             num_data += batch_len
-        if self.task == 'classification':
-            all_pred = torch.cat(all_pred, dim=0).cpu().numpy()
-            all_true = torch.cat(all_true, dim=0).cpu().numpy()
-            macro_f1 = f1_score(all_true, all_pred, average='macro', zero_division=0)
-            acc = (all_pred == all_true).mean()  # 如果 CNLL_ 返回的 MSE 是 ACC，可替代
-            return acc, epoch_ll / num_data, 0, 0, macro_f1
-        return epoch_mse/num_data, epoch_ll/num_data, epoch_impute_mse/num_data, epoch_impute_ll/num_data, None
+        avg_macro_f1 = epoch_f1 / num_batches if self.task == 'classification' else None
+        return epoch_mse/num_data, epoch_ll/num_data, epoch_impute_mse/num_data, epoch_impute_ll/num_data, avg_macro_f1
 
     def generate_traj(self, data):
         obs, truth, obs_valid, obs_times = [j.to(self.device).to(torch.float32) for j in data]
