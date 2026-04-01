@@ -4,6 +4,7 @@ import time
 import wandb
 import torch
 import torch.nn as nn
+from sklearn.metrics import f1_score
 
 import lib.sde as sde
 from lib.losses import MSE_, GNLL_, BNLL_, CNLL_
@@ -96,29 +97,50 @@ class ACSSM():
             print('--------------[ {} || {} ]--------------'.format(epoch, self.n_epoch))
             print('[Time elapsed] : {0}:{1:02d}:{2:05.2f}'.format(*get_time(time.time() - self.start_time)))      
             with torch.no_grad():
-                test_mse, test_nll, impute_mse, impute_nll = self.eval_func(eval_dl)
-            
+                test_mse, test_nll, impute_mse, impute_nll,  test_f1 = self.eval_func(eval_dl)
+
+            log_dict = {
+                "train_nll": epoch_ll / num_data,
+                "train_loss": epoch_loss / num_data,
+                "eval_nll": test_nll,
+            }
             if self.task == 'classification':
                 print("[Train  ] NLL : {:.6f} || ACC : {:.6f}".format(epoch_ll/num_data, epoch_mse/num_data))
-                print("[Eval  ] NLL : {:.6f} || ACC : {:.6f}".format(test_nll, test_mse))
-                wandb.log({"train_acc" : (epoch_mse/num_data)}, step=epoch)
-                wandb.log({"eval_acc" : test_mse}, step=epoch)
+                print("[Eval  ] NLL : {:.6f} || ACC : {:.6f} || Macro F1 : {:.6f}".format(test_nll, test_mse, test_f1))
+                # wandb.log({"train_acc" : (epoch_mse/num_data)}, step=epoch)
+                # wandb.log({"eval_acc" : test_mse}, step=epoch)
+                # wandb.log({"eval_macro_f1" : test_f1}, step=epoch)
+                log_dict.update({
+                    "train_acc": epoch_mse / num_data,
+                    "eval_acc": test_mse,
+                    "eval_macro_f1": test_f1
+                })
 
             else:
                 print("[Train  ] NLL : {:.6f} || MSE : {:.6f}".format(epoch_ll/num_data, epoch_mse/num_data))
                 print("[Eval  ] NLL : {:.6f} || MSE : {:.6f}".format(test_nll, test_mse))
-                wandb.log({"train_mse" : (epoch_mse/num_data)}, step=epoch)
-                wandb.log({"eval_mse" : test_mse}, step=epoch)    
+                # wandb.log({"train_mse" : (epoch_mse/num_data)}, step=epoch)
+                # wandb.log({"eval_mse" : test_mse}, step=epoch)
+                log_dict.update({
+                    "train_mse": epoch_mse / num_data,
+                    "eval_mse": test_mse
+                })
                 
-            wandb.log({"train_nll" : (epoch_ll/num_data)}, step=epoch)
-            wandb.log({"train_loss" : (epoch_loss/num_data)}, step=epoch)
-            wandb.log({"eval_nll" : test_nll}, step=epoch)
+            # wandb.log({"train_nll" : (epoch_ll/num_data)}, step=epoch)
+            # wandb.log({"train_loss" : (epoch_loss/num_data)}, step=epoch)
+            # wandb.log({"eval_nll" : test_nll}, step=epoch)
             
             if self.task == 'extrapolation' or self.task == 'interpolation':
                 print("[Impute ] NLL : {:.6f} || MSE : {:.6f}".format(impute_nll, impute_mse))
-                wandb.log({"impute_nll" : impute_nll}, step=epoch)
-                wandb.log({"impute_mse" : impute_mse}, step=epoch) 
-                
+                # wandb.log({"impute_nll" : impute_nll}, step=epoch)
+                # wandb.log({"impute_mse" : impute_mse}, step=epoch)
+                log_dict.update({
+                    "impute_nll": impute_nll,
+                    "impute_mse": impute_mse
+                })
+
+            wandb.log(log_dict, step=epoch)
+
             if (epoch+1) % 100 == 0:
                 if not os.path.exists('./checkpoints'):
                     os.makedirs('./checkpoints')
@@ -130,11 +152,14 @@ class ACSSM():
     def eval_func(self, dl):
         epoch_mse = 0
         epoch_ll = 0
+        epoch_f1 = 0
         
         epoch_impute_mse = 0
         epoch_impute_ll = 0
         
         num_data = 0
+        all_pred = []
+        all_true = []
         for _, data in enumerate(dl):
         
             if self.dataset == 'pendulum':
@@ -177,6 +202,11 @@ class ACSSM():
                 eval_mse = MSE_(truth.flatten(start_dim=2), mean.flatten(start_dim=3), mask = mask_truth.flatten(start_dim=2)) * batch_len
             elif self.task == 'classification':
                 eval_nll, eval_mse = CNLL_(labels, mean)
+                pred_labels = torch.argmax(mean, dim=1)
+                true_labels = torch.argmax(labels, dim=1)
+                all_pred.append(pred_labels)
+                all_true.append(true_labels)
+                epoch_ll += eval_nll.item()
             else:
                 eval_nll = GNLL_(truth, mean, var, mask=mask_truth) * batch_len
                 eval_mse = MSE_(truth, mean, mask=mask_truth) * batch_len
@@ -199,8 +229,13 @@ class ACSSM():
                     epoch_impute_ll += impute_nll.item()
 
             num_data += batch_len
-                
-        return epoch_mse/num_data, epoch_ll/num_data, epoch_impute_mse/num_data, epoch_impute_ll/num_data
+        if self.task == 'classification':
+            all_pred = torch.cat(all_pred, dim=0).cpu().numpy()
+            all_true = torch.cat(all_true, dim=0).cpu().numpy()
+            macro_f1 = f1_score(all_true, all_pred, average='macro', zero_division=0)
+            acc = (all_pred == all_true).mean()  # 如果 CNLL_ 返回的 MSE 是 ACC，可替代
+            return acc, epoch_ll / num_data, 0, 0, macro_f1
+        return epoch_mse/num_data, epoch_ll/num_data, epoch_impute_mse/num_data, epoch_impute_ll/num_data, None
 
     def generate_traj(self, data):
         obs, truth, obs_valid, obs_times = [j.to(self.device).to(torch.float32) for j in data]

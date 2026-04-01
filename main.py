@@ -103,11 +103,9 @@ def main(args):
     for o in vars(args):
         print("#", o, ":", getattr(args, o))
     run = ACSSM(args)
-    # wandb.init(project="acssm", config=args, save_code=True, mode="online",
-    #            name=f'{args.problem_name}')
-    wandb.init(project="acssm", config=args, save_code=True, mode="disabled",
+    wandb.init(project="acssm", config=args, save_code=True, mode="online",
                name=f'{args.problem_name}')
-    print((f"# param of model: {count_parameters(run.dynamics)}"))
+    print(f"# param of model: {count_parameters(run.dynamics)}")
     train_dl, valid_dl = load_data(args)
     run.train_and_eval(train_dl, valid_dl)
     
