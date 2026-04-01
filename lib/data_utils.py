@@ -3,6 +3,8 @@ This source code is adapted and modified from
 	https://github.com/boschresearch/Continuous-Recurrent-Units
 Authors: Mona Schirmer, Mazin Eltayeb, Stefan Lessmann and Maja Rudolph (ICML 2022)
 """
+import sys
+
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
@@ -31,7 +33,7 @@ from transforms import (
 from timematch_utils.label_utils import get_classes
  
 def load_data(args):
-    file_path = f'data/{args.dataset}/'
+    file_path = f'{args.data_root}/'
     
     # Pendulum 
     if args.dataset == 'pendulum':
@@ -472,23 +474,12 @@ def get_data_loaders(splits, config):
         indices=splits[config.source]["train"],
     )
     source_loader = create_data_loader(source_dataset)
-    target_dataset = PixelSetData(
-        config.data_root,
-        config.target,
-        config.classes,
-        train_transform,
-        indices=splits[config.target]["train"],
-    )
-    target_loader = create_data_loader(target_dataset)
 
     print(
         f"size of source dataset: {len(source_dataset)} ({len(source_loader)} batches)"
     )
-    print(
-        f"size of target dataset: {len(target_dataset)} ({len(target_loader)} batches)"
-    )
 
-    return source_loader, target_loader
+    return source_loader
 
 
 
@@ -524,98 +515,24 @@ def load_data_timematch(config):
     Load TimeMatch data for ACSSM (single-domain supervised classification).
     Returns (train_loader, valid_loader) from SOURCE domain.
     """
-    # --- 1. Determine source classes (filter rare classes) ---
-    source_country = config.source.split('/')[0]
-    all_source_classes = get_classes(
-        source_country,
+    source_classes = label_utils.get_classes(
+        config.source.split('/')[0],
         combine_spring_and_winter=config.combine_spring_and_winter
     )
-
-    # Load full source dataset to count labels
-    full_source_data = PixelSetData(config.data_root, config.source, all_source_classes)
-    labels, counts = np.unique(full_source_data.get_labels(), return_counts=True)
-    filtered_classes = [all_source_classes[i] for i in labels if counts[labels == i] >= 200]
-
-    print(f"Using {len(filtered_classes)} classes: {filtered_classes}")
-    config.classes = filtered_classes
-    config.num_classes = len(filtered_classes)
-
-    # --- 2. Create train/val/test splits (only use source) ---
-    total_source = len(full_source_data)
-    # Optional: subsample for faster debugging (remove *0.1 in real run!)
-    # total_source = int(total_source * 0.1)  # ← 仅调试时启用
-
-    indices = {config.source: total_source}
-    folds = create_train_val_test_folds(
-        datasets=[config.source],
-        num_folds=1,
-        num_indices=indices,
-        val_ratio=config.val_ratio,
-        test_ratio=config.test_ratio
-    )
+    source_data = PixelSetData(config.data_root, config.source, source_classes)
+    labels, counts = np.unique(source_data.get_labels(), return_counts=True)
+    source_classes = [source_classes[i] for i in labels[counts >= 200]]
+    print('Using classes:', source_classes)
+    config.classes = source_classes
+    config.num_classes = len(source_classes)
+    indices = {config.source: int(0.05*len(source_data)),
+               config.target: int(0.1*len(PixelSetData(config.data_root, config.target, source_classes)))}
+    # indices = {config.source: len(source_data),
+    #            config.target: len(PixelSetData(config.data_root, config.target, source_classes))}
+    folds = create_train_val_test_folds([config.source, config.target], config.num_folds, indices, config.val_ratio,
+                                        config.test_ratio)
     splits = folds[0]
 
-    # --- 3. Define transform (same as TimeMatch) ---
-    train_transform = transforms.Compose([
-        RandomSamplePixels(config.num_pixels),  # usually 1
-        RandomSampleTimeSteps(config.seq_length),  # e.g., 30
-        Normalize(),
-        ToTensor(),
-    ])
-
-    # --- 4. Build train & val datasets (source only) ---
-    train_dataset = PixelSetData(
-        config.data_root,
-        config.source,
-        config.classes,
-        train_transform,
-        indices=splits[config.source]["train"],
-    )
-    val_dataset = PixelSetData(
-        config.data_root,
-        config.target,
-        config.classes,
-        train_transform,  # Note: still uses train transform (with random sampling)
-        indices=splits[config.target]["test"],
-    )
-
-    # --- 5. Collate function for ACSSM compatibility ---
-    def timematch_collate_fn(batch):
-        B = len(batch)
-        T = batch[0]['pixels'].shape[0]  # fixed by RandomSampleTimeSteps
-        C = batch[0]['pixels'].shape[1]
-
-        inp_obs = torch.stack([item['pixels'].squeeze(-1) for item in batch])  # [B, T, C]
-        inp_tid = torch.stack([item['positions'] for item in batch])  # [B, T]
-        aux_obs = torch.tensor([item['label'] for item in batch], dtype=torch.long)  # [B,]
-        obs_valid = torch.ones(B, T, dtype=torch.bool)
-
-        return {
-            'inp_obs': inp_obs,
-            'evd_obs': inp_obs,  # for classification, evidence = input
-            'inp_tid': inp_tid,
-            'aux_obs': aux_obs,
-            'obs_valid': obs_valid,
-        }
-
-    # --- 6. Create DataLoaders ---
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=config.batch_size,
-        shuffle=True,
-        collate_fn=timematch_collate_fn,
-        num_workers=config.num_workers,
-        pin_memory=config.pin_memory,
-        drop_last=True,
-    )
-    valid_loader = torch.utils.data.DataLoader(
-        val_dataset,
-        batch_size=config.batch_size,
-        shuffle=False,
-        collate_fn=timematch_collate_fn,
-        num_workers=config.num_workers,
-        pin_memory=config.pin_memory,
-        drop_last=False,
-    )
-
-    return train_loader, valid_loader
+    train_loader = get_data_loaders(splits, config)
+    _, test_loader = create_evaluation_loaders(config.target, splits, config)
+    return train_loader, test_loader
