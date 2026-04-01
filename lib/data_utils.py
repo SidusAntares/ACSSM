@@ -460,7 +460,7 @@ def get_data_loaders(splits, config):
         [
             RandomSamplePixels(config.num_pixels),
             RandomSampleTimeSteps(config.seq_length),
-            RandomTemporalShift(max_shift=config.max_shift_aug, p=config.shift_aug_p) ,
+            # RandomTemporalShift(max_shift=config.max_shift_aug, p=config.shift_aug_p) ,
             Normalize(),
             ToTensor(),
         ]
