@@ -1,15 +1,27 @@
 import os
 import sys
 import time
-import wandb
 import torch
 import torch.nn as nn
-from sklearn.metrics import f1_score
+import pandas as pd
+from datetime import datetime
+now = datetime.now()
+run_id = now.strftime("%Y%m%d_%H%M%S_%f")[:-3]
 
 import lib.sde as sde
 from lib.losses import MSE_, GNLL_, BNLL_, CNLL_, F1_
 from lib.data_utils import adjust_obs_for_extrapolation
 from lib.utils import get_time
+
+def match(domain):
+    if domain == 'france/30TXT/2017':
+        return 'FR1'
+    elif domain == 'france/31TCJ/2017':
+        return 'FR2'
+    elif domain == 'denmark/32VNH/2017':
+        return 'DK1'
+    else:
+        return 'AT1'
 
 class ACSSM():
     def __init__(self, args):
@@ -23,7 +35,11 @@ class ACSSM():
         self.dynamics = sde.LinearSDE(args)
         self.dynamics = self.dynamics.to(self.device)
         self.optimizer = torch.optim.AdamW(self.dynamics.parameters(), lr=args.lr, weight_decay=args.wd)
-        
+
+        self.source_name = match(args.source)
+        self.target_name = match(args.target)
+
+        self.log_history = []
     
     def train_and_eval(self, train_dl, eval_dl):
         
@@ -139,7 +155,8 @@ class ACSSM():
                     "impute_mse": impute_mse
                 })
 
-            wandb.log(log_dict, step=epoch)
+            log_dict["epoch"] = epoch
+            self.log_history.append(log_dict)
 
             if (epoch+1) % 100 == 0:
                 if not os.path.exists('./checkpoints'):
@@ -148,7 +165,12 @@ class ACSSM():
                     'epooch' : epoch,
                     'model_state_dict' : self.dynamics.state_dict()}, 
                            f'./checkpoints/{self.dataset}_{self.task}_{epoch+1}.pt')
-                     
+        log_df = pd.DataFrame(self.log_history)
+        csv_path = f"./logs/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}_{run_id}.csv"
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        log_df.to_csv(csv_path, index=False)
+        print(f"Training log saved to {csv_path}")
+
     def eval_func(self, dl):
         epoch_mse = 0
         epoch_ll = 0

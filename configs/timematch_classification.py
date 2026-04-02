@@ -4,14 +4,13 @@ import ml_collections
 def get_timematch_classification_configs():
     config = ml_collections.ConfigDict()
 
-    config.random_seed = 42
     config.data_random_seed = 0
     config.T = 100
 
     config.dataset = 'timematch'  # ← 关键！
     config.task = 'classification'
     config.info_type = 'full'
-    config.num_workers = 2
+    config.num_workers = 8
     config.pin_memory = True
     config.ts = 1.0  # TimeMatch 时间戳已是整数，无需缩放
     config.lamda_1 = 1e-6
@@ -30,7 +29,7 @@ def get_timematch_classification_configs():
     config.out_dim = 12  # ← 根据你的 TimeMatch 类别数调整！
 
     # TimeMatch 特有参数（会被 parser 覆盖）
-    config.data_root = '/mnt/d/All_Documents/documents/ViT/dataset/timematch'
+    config.data_root = '/data/user/DBL/timematch_data'
     config.seq_length = 30
     config.num_pixels = 1
     config.val_ratio = 0.1

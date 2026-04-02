@@ -5,7 +5,6 @@ import random
 import os
 import numpy as np
 import argparse
-import wandb
 from dataset import PixelSetData
 
 from lib.data_utils import load_data
@@ -42,18 +41,6 @@ parser.add_argument('--data_root', type=str, default='/mnt/d/All_Documents/docum
 # parser.add_argument('--data_root', default='/data/user/DBL/timematch_data', type=str,
 #                         help='Path to datasets root directory.')
 
-problem_name = parser.parse_args().problem_name
-default_config = {
-    'pendulum_regression':     configs.get_pendulum_regression_configs,
-    'physionet_interpolation': configs.get_physionet_interpolation_configs,
-    'physionet_extrapolation': configs.get_physionet_extrapolation_configs,
-    'ushcn_interpolation':     configs.get_ushcn_interpolation_configs,
-    'ushcn_extrapolation':     configs.get_ushcn_extrapolation_configs,
-    'person_activity_classification': configs.get_person_activity_classification_configs,
-    'timematch_classification': configs.get_timematch_classification_configs,
-
-}.get(problem_name)()
-parser.set_defaults(**default_config)
 # timamatch
 parser.add_argument("--gpu", type=int, default=0, help="GPU device")
 
@@ -70,22 +57,36 @@ parser.add_argument('--shift_aug_p', default=1.0, type=float,
                     help='probability to apply temporal shift augmentation')
 parser.add_argument('--max_shift_aug', default=60, type=int,
                     help='highest shift to apply for temporal shift augmentation')
+parser.add_argument('--seed', default=111, type=int)
+
+problem_name = parser.parse_args().problem_name
+default_config = {
+    'pendulum_regression':     configs.get_pendulum_regression_configs,
+    'physionet_interpolation': configs.get_physionet_interpolation_configs,
+    'physionet_extrapolation': configs.get_physionet_extrapolation_configs,
+    'ushcn_interpolation':     configs.get_ushcn_interpolation_configs,
+    'ushcn_extrapolation':     configs.get_ushcn_extrapolation_configs,
+    'person_activity_classification': configs.get_person_activity_classification_configs,
+    'timematch_classification': configs.get_timematch_classification_configs,
+
+}.get(problem_name)()
+parser.set_defaults(**default_config)
 
 args = parser.parse_args()
 
 args.device = 'cuda:' + str(args.gpu)
-seed = args.random_seed
-set_seed(seed)
+# seed = args.random_seed
+set_seed(args.seed)
 
-def match(domain):
-    match domain:
-        case 'france/30TXT/2017':
-            return 'FR1'
-        case 'france/31TCJ/2017':
-            return 'FR2'
-        case 'denmark/32VNH/2017':
-            return 'DK1'
-    return 'AT1'
+# def match(domain):
+#     match domain:
+#         case 'france/30TXT/2017':
+#             return 'FR1'
+#         case 'france/31TCJ/2017':
+#             return 'FR2'
+#         case 'denmark/32VNH/2017':
+#             return 'DK1'
+#     return 'AT1'
 
 def main(args):
     config = args
@@ -103,8 +104,11 @@ def main(args):
     for o in vars(args):
         print("#", o, ":", getattr(args, o))
     run = ACSSM(args)
-    wandb.init(project="acssm", config=args, save_code=True, mode="online",
-               name=f'{args.problem_name}')
+    # wandb.init(project="acssm", config=args, save_code=True, mode="online",
+    #            name=f'{args.problem_name}')
+    # wandb.init(project="acssm", config=args, save_code=True, mode="offline",
+    #            name=f'{args.problem_name}')
+    #wandb sync同步日志
     print(f"# param of model: {count_parameters(run.dynamics)}")
     train_dl, valid_dl = load_data(args)
     run.train_and_eval(train_dl, valid_dl)

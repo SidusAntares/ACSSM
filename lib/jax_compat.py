@@ -250,16 +250,25 @@ def _complex_uniform(shape: Sequence[int],
     return r * torch.exp(1j * theta)
 
 
+# def complex_as_float_dtype(dtype):
+#     match dtype:
+#         case torch.complex32:
+#             return torch.float32  # NOTE: complexe32 is not wel supported yet
+#         case torch.complex64:
+#             return torch.float32
+#         case torch.complex128:
+#             return torch.float64
+#         case _:
+#             return dtype
 def complex_as_float_dtype(dtype):
-    match dtype:
-        case torch.complex32:
-            return torch.float32  # NOTE: complexe32 is not wel supported yet
-        case torch.complex64:
-            return torch.float32
-        case torch.complex128:
-            return torch.float64
-        case _:
-            return dtype
+    if dtype == torch.complex32:
+        return torch.float32  # NOTE: complex32 is not well supported yet
+    elif dtype == torch.complex64:
+        return torch.float32
+    elif dtype == torch.complex128:
+        return torch.float64
+    else:
+        return dtype
 
 
 def _complex_truncated_normal(upper: float,
@@ -307,34 +316,61 @@ def variance_scaling(scale: float,
              dtype=dtype,
              device=None):
         fan_in, fan_out = _compute_fans(shape, fan_in_axes)
-        match mode:
-            case 'fan_in':
-                denom = max(1, fan_in)
-            case 'fan_out':
-                denom = max(1, fan_out)
-            case 'fan_avg':
-                denom = max(1, (fan_in + fan_out) / 2)
-            case _:
-                raise ValueError(f"invalid mode for variance scaling initializer: {mode}")
+        # match mode:
+        #     case 'fan_in':
+        #         denom = max(1, fan_in)
+        #     case 'fan_out':
+        #         denom = max(1, fan_out)
+        #     case 'fan_avg':
+        #         denom = max(1, (fan_in + fan_out) / 2)
+        #     case _:
+        #         raise ValueError(f"invalid mode for variance scaling initializer: {mode}")
+        if mode == 'fan_in':
+            denom = max(1, fan_in)
+        elif mode == 'fan_out':
+            denom = max(1, fan_out)
+        elif mode == 'fan_avg':
+            denom = max(1, (fan_in + fan_out) / 2)
+        else:
+            raise ValueError(f"invalid mode for variance scaling initializer: {mode}")
 
         variance = scale/denom
-        match distribution:
-            case 'normal':
-                return torch.normal(0, np.sqrt(variance), shape, dtype=dtype, device=device)
-            case 'uniform':
-                if dtype.is_complex:
-                    return _complex_uniform(shape, dtype=dtype, device=device) * np.sqrt(variance)
-                else:
-                    return uniform(shape, dtype=dtype, device=device, minval=-1, maxval=1.0) * np.sqrt(3 * variance)
-            case 'truncated_normal':
-                if dtype.is_complex:
-                    stddev = np.sqrt(variance) * 0.95311164380491208
-                    return _complex_truncated_normal(2, shape, dtype=dtype, device=device) * stddev
-                else:
-                    stddev = np.sqrt(variance) * 0.87962566103423978
-                    return _truncated_normal(-2., 2., shape, dtype=dtype) * stddev
-            case _:
-                raise ValueError(f"invalid distribution for variance scaling initializer: {distribution}")
+        # match distribution:
+        #     case 'normal':
+        #         return torch.normal(0, np.sqrt(variance), shape, dtype=dtype, device=device)
+        #     case 'uniform':
+        #         if dtype.is_complex:
+        #             return _complex_uniform(shape, dtype=dtype, device=device) * np.sqrt(variance)
+        #         else:
+        #             return uniform(shape, dtype=dtype, device=device, minval=-1, maxval=1.0) * np.sqrt(3 * variance)
+        #     case 'truncated_normal':
+        #         if dtype.is_complex:
+        #             stddev = np.sqrt(variance) * 0.95311164380491208
+        #             return _complex_truncated_normal(2, shape, dtype=dtype, device=device) * stddev
+        #         else:
+        #             stddev = np.sqrt(variance) * 0.87962566103423978
+        #             return _truncated_normal(-2., 2., shape, dtype=dtype) * stddev
+        #     case _:
+        #         raise ValueError(f"invalid distribution for variance scaling initializer: {distribution}")
+        if distribution == 'normal':
+            return torch.normal(0, np.sqrt(variance), shape, dtype=dtype, device=device)
+
+        elif distribution == 'uniform':
+            if dtype.is_complex:
+                return _complex_uniform(shape, dtype=dtype, device=device) * np.sqrt(variance)
+            else:
+                return uniform(shape, dtype=dtype, device=device, minval=-1, maxval=1.0) * np.sqrt(3 * variance)
+
+        elif distribution == 'truncated_normal':
+            if dtype.is_complex:
+                stddev = np.sqrt(variance) * 0.95311164380491208
+                return _complex_truncated_normal(2, shape, dtype=dtype, device=device) * stddev
+            else:
+                stddev = np.sqrt(variance) * 0.87962566103423978
+                return _truncated_normal(-2., 2., shape, dtype=dtype) * stddev
+
+        else:
+            raise ValueError(f"invalid distribution for variance scaling initializer: {distribution}")
 
     return init
 
