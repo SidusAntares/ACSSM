@@ -40,9 +40,102 @@ class ACSSM():
         self.target_name = match(args.target)
 
         self.log_history = []
-    
+        self.noise_scale = args.noise_scale
+
+    def train_and_eval_adaptation(self, src_data_loader, trg_test_loder, trg_train_loader):
+        assert self.dataset == 'timematch' and self.task == 'classification',"the function created for timematch classification"
+        self.start_time = time.time()
+        for epoch in range(self.n_epoch):
+            epoch_ll = 0
+            epoch_mse = 0
+            epoch_loss = 0
+            num_data = 0
+
+            for _, (data, trg_data) in enumerate(zip(src_data_loader, trg_train_loader)):
+
+                obs = data['inp_obs'].to(self.device)
+                truth = data['evd_obs'].to(self.device)
+                obs_times = data['inp_tid'].to(self.device)
+                labels = data['aux_obs'].to(self.device)
+                obs_valid = data['obs_valid'].to(self.device)
+                mask_truth = data['mask_truth'].to(self.device)
+                mask_obs = data['mask_obs'].to(self.device)
+
+                assert trg_data['inp_obs'].shape == obs.shape
+
+                trg_obs = trg_data['inp_obs'].to(self.device)
+                assert trg_obs.shape == obs.shape
+                noise = trg_obs.mean(dim=0,keepdim=True) - obs  # close to trg
+                obs_magnitude = obs.abs().mean(dim=(1, 2), keepdim=True)
+                noise_magnitude = noise.abs().mean(dim=(1, 2), keepdim=True)
+                ratio = obs_magnitude / (noise_magnitude + 1e-8)  # (Batch, 1, 1)
+                obs += noise * self.noise_scale * ratio
+
+                self.optimizer.zero_grad()
+                out, L_alpha = self.dynamics(obs, obs_times, obs_valid, mask_obs, n_samples=3, epoch=epoch)
+                mean, var = out
+
+                # Example loss
+                batch_len = truth.size(0)
+
+                if self.dataset == 'pendulum' and self.task == 'interpolation':
+                    train_nll = BNLL_(truth, mean) * batch_len
+                    train_mse = MSE_(truth.flatten(start_dim=2), mean.flatten(start_dim=3),
+                                     mask=mask_truth.flatten(start_dim=2)) * batch_len
+                elif self.task == 'classification':
+                    train_nll, train_mse = CNLL_(labels, mean)
+                else:
+                    train_nll = GNLL_(truth, mean, var, mask=mask_truth) * batch_len
+                    train_mse = MSE_(truth, mean, mask=mask_truth) * batch_len
+
+                loss = train_nll + L_alpha
+
+                loss.backward()
+                if self.task == 'classification':
+                    nn.utils.clip_grad_norm_(self.dynamics.parameters(), 1)
+                self.optimizer.step()
+
+                epoch_mse += train_mse.item()
+                epoch_ll += train_nll.item()
+                epoch_loss += loss.item()
+                num_data += batch_len
+
+            print('--------------[ {} || {} ]--------------'.format(epoch, self.n_epoch))
+            print('[Time elapsed] : {0}:{1:02d}:{2:05.2f}'.format(*get_time(time.time() - self.start_time)))
+            with torch.no_grad():
+                test_mse, test_nll, impute_mse, impute_nll, test_f1 = self.eval_func(trg_test_loder)
+
+            log_dict = {
+                "train_nll": epoch_ll / num_data,
+                "train_loss": epoch_loss / num_data,
+                "eval_nll": test_nll,
+            }
+            print("[Train  ] NLL : {:.6f} || ACC : {:.6f}".format(epoch_ll / num_data, epoch_mse / num_data))
+            print("[Eval  ] NLL : {:.6f} || ACC : {:.6f} || Macro F1 : {:.6f}".format(test_nll, test_mse, test_f1))
+            log_dict.update({
+                "train_acc": epoch_mse / num_data,
+                "eval_acc": test_mse,
+                "eval_macro_f1": test_f1
+            })
+
+            log_dict["epoch"] = epoch
+            self.log_history.append(log_dict)
+
+            if (epoch + 1) % 100 == 0:
+                if not os.path.exists('./checkpoints'):
+                    os.makedirs('./checkpoints')
+                torch.save({
+                    'epooch': epoch,
+                    'model_state_dict': self.dynamics.state_dict()},
+                    f'./checkpoints/{self.dataset}_{self.task}_{epoch + 1}.pt')
+        log_df = pd.DataFrame(self.log_history)
+        csv_path = f"./logs/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}_{run_id}.csv"
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        log_df.to_csv(csv_path, index=False)
+        print(f"Training log saved to {csv_path}")
+
     def train_and_eval(self, train_dl, eval_dl):
-        
+
         self.start_time=time.time()
         for epoch in range(self.n_epoch):
             epoch_ll = 0
@@ -50,7 +143,7 @@ class ACSSM():
             epoch_loss = 0
             num_data = 0
             for _, data in enumerate(train_dl):
-                
+
                 if self.dataset == 'pendulum':
                     if self.task == 'regression':
                         obs, truth, obs_times, obs_valid = [j.to(self.device).to(torch.float32) for j in data]
@@ -73,7 +166,6 @@ class ACSSM():
                     truth = data['evd_obs'].to(self.device)
                     obs_times = data['inp_tid'].to(self.device)
                     labels = data['aux_obs'].to(self.device)
-                    truth = truth.to(self.device).to(torch.float32)
                     obs_valid = data['obs_valid'].to(self.device)
                     mask_truth = data['mask_truth'].to(self.device)
                     mask_obs = data['mask_obs'].to(self.device)
@@ -97,21 +189,21 @@ class ACSSM():
                 else:
                     train_nll = GNLL_(truth, mean, var, mask = mask_truth) * batch_len
                     train_mse = MSE_(truth, mean, mask = mask_truth) * batch_len
-                    
+
                 loss = train_nll + L_alpha
-                
+
                 loss.backward()
                 if self.task == 'classification':
                     nn.utils.clip_grad_norm_(self.dynamics.parameters(), 1)
                 self.optimizer.step()
-                
+
                 epoch_mse += train_mse.item()
                 epoch_ll += train_nll.item()
                 epoch_loss += loss.item()
                 num_data += batch_len
-                
+
             print('--------------[ {} || {} ]--------------'.format(epoch, self.n_epoch))
-            print('[Time elapsed] : {0}:{1:02d}:{2:05.2f}'.format(*get_time(time.time() - self.start_time)))      
+            print('[Time elapsed] : {0}:{1:02d}:{2:05.2f}'.format(*get_time(time.time() - self.start_time)))
             with torch.no_grad():
                 test_mse, test_nll, impute_mse, impute_nll,  test_f1 = self.eval_func(eval_dl)
 
@@ -141,11 +233,11 @@ class ACSSM():
                     "train_mse": epoch_mse / num_data,
                     "eval_mse": test_mse
                 })
-                
+
             # wandb.log({"train_nll" : (epoch_ll/num_data)}, step=epoch)
             # wandb.log({"train_loss" : (epoch_loss/num_data)}, step=epoch)
             # wandb.log({"eval_nll" : test_nll}, step=epoch)
-            
+
             if self.task == 'extrapolation' or self.task == 'interpolation':
                 print("[Impute ] NLL : {:.6f} || MSE : {:.6f}".format(impute_nll, impute_mse))
                 # wandb.log({"impute_nll" : impute_nll}, step=epoch)
@@ -163,7 +255,7 @@ class ACSSM():
                     os.makedirs('./checkpoints')
                 torch.save({
                     'epooch' : epoch,
-                    'model_state_dict' : self.dynamics.state_dict()}, 
+                    'model_state_dict' : self.dynamics.state_dict()},
                            f'./checkpoints/{self.dataset}_{self.task}_{epoch+1}.pt')
         log_df = pd.DataFrame(self.log_history)
         csv_path = f"./logs/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}_{run_id}.csv"

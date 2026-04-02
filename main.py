@@ -58,6 +58,7 @@ parser.add_argument('--shift_aug_p', default=1.0, type=float,
 parser.add_argument('--max_shift_aug', default=60, type=int,
                     help='highest shift to apply for temporal shift augmentation')
 parser.add_argument('--seed', default=111, type=int)
+parser.add_argument('--classes')
 
 problem_name = parser.parse_args().problem_name
 default_config = {
@@ -98,6 +99,7 @@ def main(args):
     labels, counts = np.unique(source_data.get_labels(), return_counts=True)
     source_classes = [source_classes[i] for i in labels[counts >= 200]]
     print(len(source_classes))
+    args.classes = source_classes
     args.num_classes = len(source_classes)
     args.out_dim = len(source_classes)
     # ========= print options =========
@@ -110,7 +112,7 @@ def main(args):
     #            name=f'{args.problem_name}')
     #wandb sync同步日志
     print(f"# param of model: {count_parameters(run.dynamics)}")
-    train_dl, valid_dl = load_data(args)
-    run.train_and_eval(train_dl, valid_dl)
+    train_dl, valid_dl, trg_train_loader = load_data(args)
+    run.train_and_eval_adaptation(train_dl, valid_dl, trg_train_loader)
     
 main(args)

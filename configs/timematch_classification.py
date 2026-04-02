@@ -29,11 +29,15 @@ def get_timematch_classification_configs():
     config.out_dim = 12  # ← 根据你的 TimeMatch 类别数调整！
 
     # TimeMatch 特有参数（会被 parser 覆盖）
-    config.data_root = '/data/user/DBL/timematch_data'
+    # config.data_root = '/data/user/DBL/timematch_data'
+    config.data_root = '/mnt/d/All_Documents/documents/ViT/dataset/timematch'
     config.seq_length = 30
     config.num_pixels = 1
     config.val_ratio = 0.1
     config.test_ratio = 0.2
     config.combine_spring_and_winter = False
+
+    # 论文创新
+    config.noise_scale = 0.01
 
     return config
