@@ -37,7 +37,6 @@ def get_timematch_classification_configs():
     config.test_ratio = 0.2
     config.combine_spring_and_winter = False
 
-    # 论文创新
-    config.noise_scale = 0.01
+
 
     return config

@@ -60,6 +60,9 @@ parser.add_argument('--max_shift_aug', default=60, type=int,
 parser.add_argument('--seed', default=111, type=int)
 parser.add_argument('--classes')
 
+# innovation
+parser.add_argument('--ns', default=0.01, type=float)
+
 problem_name = parser.parse_args().problem_name
 default_config = {
     'pendulum_regression':     configs.get_pendulum_regression_configs,

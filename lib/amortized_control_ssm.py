@@ -40,7 +40,8 @@ class ACSSM():
         self.target_name = match(args.target)
 
         self.log_history = []
-        self.noise_scale = args.noise_scale
+        self.noise_scale = args.ns
+        self.seed = args.seed
 
     def train_and_eval_adaptation(self, src_data_loader, trg_test_loder, trg_train_loader):
         assert self.dataset == 'timematch' and self.task == 'classification',"the function created for timematch classification"
@@ -129,7 +130,7 @@ class ACSSM():
                     'model_state_dict': self.dynamics.state_dict()},
                     f'./checkpoints/{self.dataset}_{self.task}_{epoch + 1}.pt')
         log_df = pd.DataFrame(self.log_history)
-        csv_path = f"./logs/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}_{run_id}.csv"
+        csv_path = f"./new_logs/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}_{self.seed}_{self.noise_scale}.csv"
         os.makedirs(os.path.dirname(csv_path), exist_ok=True)
         log_df.to_csv(csv_path, index=False)
         print(f"Training log saved to {csv_path}")
