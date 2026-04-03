@@ -5,6 +5,9 @@ import torch
 import torch.nn as nn
 import pandas as pd
 from datetime import datetime
+
+from tfda.loss import CrossEntropyLabelSmooth
+
 now = datetime.now()
 run_id = now.strftime("%Y%m%d_%H%M%S_%f")[:-3]
 
@@ -42,6 +45,11 @@ class ACSSM():
         self.log_history = []
         self.noise_scale = args.ns
         self.seed = args.seed
+
+        # losses
+        self.mse_loss = nn.MSELoss()
+        self.cross_entropy = CrossEntropyLabelSmooth(args.num_classes, self.device, epsilon=0.1, )
+        self.kl_loss = nn.KLDivLoss(reduction="mean")
 
     def train_and_eval_adaptation(self, src_data_loader, trg_test_loder, trg_train_loader):
         assert self.dataset == 'timematch' and self.task == 'classification',"the function created for timematch classification"
@@ -342,3 +350,6 @@ class ACSSM():
         out, KL = self.dynamics(obs, obs_times, obs_valid, mask_obs, n_samples=32)
         mean, var = out
         return truth, mean
+
+    def adapt(self):
+        pass
