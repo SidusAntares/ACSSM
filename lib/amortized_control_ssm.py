@@ -74,11 +74,11 @@ class ACSSM():
 
                 trg_obs = trg_data['inp_obs'].to(self.device)
                 assert trg_obs.shape == obs.shape
-                noise = trg_obs.mean(dim=0,keepdim=True) - obs  # close to trg
-                obs_magnitude = obs.abs().mean(dim=(1, 2), keepdim=True)
-                noise_magnitude = noise.abs().mean(dim=(1, 2), keepdim=True)
-                ratio = obs_magnitude / (noise_magnitude + 1e-8)  # (Batch, 1, 1)
-                obs += noise * self.noise_scale * ratio
+                trg_energy = trg_obs.pow(2).mean().sqrt()  # 全局 RMS
+                src_energy = obs.pow(2).mean(dim=(1, 2), keepdim=True).sqrt()  # 单样本 RMS
+                energy_ratio = trg_energy / (src_energy + 1e-8)
+                noise_pattern = trg_obs.mean(dim=0, keepdim=True) - obs.mean(dim=(1, 2), keepdim=True)
+                obs += noise_pattern * self.noise_scale * energy_ratio
 
                 self.optimizer.zero_grad()
                 out, L_alpha = self.dynamics(obs, obs_times, obs_valid, mask_obs, n_samples=3, epoch=epoch)
