@@ -79,21 +79,14 @@ class ACSSM():
                 # Example loss
                 batch_len = truth.size(0)
 
-                if self.dataset == 'pendulum' and self.task == 'interpolation':
-                    train_nll = BNLL_(truth, mean) * batch_len
-                    train_mse = MSE_(truth.flatten(start_dim=2), mean.flatten(start_dim=3),
-                                     mask=mask_truth.flatten(start_dim=2)) * batch_len
-                elif self.task == 'classification':
-                    train_nll, train_mse = CNLL_(labels, mean)
-                else:
-                    train_nll = GNLL_(truth, mean, var, mask=mask_truth) * batch_len
-                    train_mse = MSE_(truth, mean, mask=mask_truth) * batch_len
+                train_nll, train_mse = CNLL_(labels, mean)
+
 
                 loss = train_nll + L_alpha
 
                 loss.backward()
-                if self.task == 'classification':
-                    nn.utils.clip_grad_norm_(self.dynamics.parameters(), 1)
+
+                nn.utils.clip_grad_norm_(self.dynamics.parameters(), 1)
                 self.optimizer.step()
 
                 epoch_mse += train_mse.item()
