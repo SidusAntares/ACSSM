@@ -93,15 +93,11 @@ class PixelSetData(data.Dataset):
             'evd_obs': torch.as_tensor(sample['pixels'], dtype=torch.float32),  # dummy target 重建目标用于计算loss
             'inp_tid': torch.as_tensor(sample['positions'], dtype=torch.float32),  # [T]
             'aux_obs': torch.full((T,), sample['label'], dtype=torch.long),  # scalar label
-            'obs_valid': torch.ones(T, dtype=torch.bool),  # [T]
+            'obs_valid': sample['valid_pixels'].squeeze(-1) ,  # [T]
             'mask_obs': torch.ones(T, C, dtype=torch.bool),  # [T, C]
             'mask_truth': torch.ones(T, C, dtype=torch.bool),  # [T, C]
         }
 
-        for k, v in acssm_sample.items():
-            if torch.isnan(v).any():
-                print(f"NaN in {k} at index {index}")
-                raise ValueError("NaN detected!")
 
         return acssm_sample
 

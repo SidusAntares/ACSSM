@@ -83,6 +83,7 @@ class ACSSM():
                 trg_obs = trg_data['inp_obs'].to(self.device)
                 trg_times = trg_data['inp_tid'].to(self.device)
                 trg_valid = trg_data['obs_valid'].to(self.device)
+                # 这里需要修改，使用数据原长，意味着加噪函数逻辑需要修改
                 assert trg_obs.shape == src_obs.shape
                 src_obs = self.add_nosie(src_obs, src_times)
 
