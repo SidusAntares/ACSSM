@@ -26,6 +26,14 @@ def match(domain):
     else:
         return 'AT1'
 
+def add_nosie(src_obs, trg_obs, noise_scale):
+    assert trg_obs.shape == src_obs.shape
+    trg_energy = trg_obs.pow(2).mean().sqrt()  # 全局 RMS
+    src_energy = src_obs.pow(2).mean(dim=(1, 2), keepdim=True).sqrt()  # 单样本 RMS
+    energy_ratio = trg_energy / (src_energy + 1e-8)
+    noise_pattern = trg_obs.mean(dim=0, keepdim=True) - src_obs.mean(dim=(1, 2), keepdim=True)
+    return src_obs + noise_pattern * noise_scale * energy_ratio
+
 class ACSSM():
     def __init__(self, args):
         super(ACSSM, self).__init__()
@@ -60,34 +68,30 @@ class ACSSM():
             epoch_loss = 0
             num_data = 0
 
-            for _, (data, trg_data) in enumerate(zip(src_data_loader, trg_train_loader)):
+            for _, (src_data, trg_data) in enumerate(zip(src_data_loader, trg_train_loader)):
 
-                obs = data['inp_obs'].to(self.device)
-                truth = data['evd_obs'].to(self.device)
-                obs_times = data['inp_tid'].to(self.device)
-                labels = data['aux_obs'].to(self.device)
-                obs_valid = data['obs_valid'].to(self.device)
-                mask_truth = data['mask_truth'].to(self.device)
-                mask_obs = data['mask_obs'].to(self.device)
-
-                assert trg_data['inp_obs'].shape == obs.shape
+                src_obs = src_data['inp_obs'].to(self.device)
+                truth = src_data['evd_obs'].to(self.device)
+                src_times = src_data['inp_tid'].to(self.device)
+                src_labels = src_data['aux_obs'].to(self.device)
+                src_valid = src_data['obs_valid'].to(self.device)
+                mask_truth = src_data['mask_truth'].to(self.device)
+                mask_obs = src_data['mask_obs'].to(self.device)
 
                 trg_obs = trg_data['inp_obs'].to(self.device)
-                assert trg_obs.shape == obs.shape
-                trg_energy = trg_obs.pow(2).mean().sqrt()  # 全局 RMS
-                src_energy = obs.pow(2).mean(dim=(1, 2), keepdim=True).sqrt()  # 单样本 RMS
-                energy_ratio = trg_energy / (src_energy + 1e-8)
-                noise_pattern = trg_obs.mean(dim=0, keepdim=True) - obs.mean(dim=(1, 2), keepdim=True)
-                obs += noise_pattern * self.noise_scale * energy_ratio
+                trg_times = trg_data['inp_tid'].to(self.device)
+                trg_valid = trg_data['obs_valid'].to(self.device)
+                assert trg_obs.shape == src_obs.shape
+                src_obs = add_nosie(src_obs, src_times, self.noise_scale)
 
                 self.optimizer.zero_grad()
-                out, L_alpha = self.dynamics(obs, obs_times, obs_valid, mask_obs, n_samples=3, epoch=epoch)
+                out, L_alpha = self.dynamics(src_obs, src_times, src_valid, mask_obs, n_samples=3, epoch=epoch)
                 mean, var = out
 
                 # Example loss
                 batch_len = truth.size(0)
 
-                train_nll, train_mse = CNLL_(labels, mean)
+                train_nll, train_mse = CNLL_(src_labels, mean)
 
 
                 loss = train_nll + L_alpha
