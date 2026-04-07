@@ -94,7 +94,7 @@ def load_data(args):
 
     # Human Activity
     elif args.dataset == 'person_activity':
-        provider = HumanActivityProvider(file_path, download=True)
+        provider = HumanActivityProvider(file_path, download=True, random_state=args.seed)
         train_dl = provider.get_train_loader(batch_size=args.batch_size, shuffle=True)
         valid_dl = provider.get_test_loader(batch_size=args.batch_size, shuffle=False)
 

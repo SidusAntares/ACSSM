@@ -45,9 +45,9 @@ parser.add_argument('--data_root', type=str, default='/mnt/d/All_Documents/docum
 parser.add_argument("--gpu", type=int, default=0, help="GPU device")
 
 parser.add_argument('--batch_size', type=int, default=500, help='Batch size for training.')
-parser.add_argument('--balance_source', type=bool_flag, default=True, help='Use class balanced batches for source.')
+parser.add_argument('--balance_source', type=bool_flag, default=False, help='Use class balanced batches for source.')
 
-parser.add_argument('--source', default='france/31TCJ/2017', type=str, help='Source domain.')
+parser.add_argument('--source', default='france/30TXT/2017', type=str, help='Source domain.')
 parser.add_argument('--target', default='france/30TXT/2017', type=str)
 parser.add_argument('--num_folds', default=1, type=int, help='Number of cross-validation folds.')
 
@@ -96,7 +96,7 @@ def main(args):
     config = args
     source_classes = label_utils.get_classes(
         config.source.split('/')[0],
-        combine_spring_and_winter=config.combine_spring_and_winter
+        combine_spring_and_winter=False
     )
     source_data = PixelSetData(config.data_root, config.source, source_classes)
     labels, counts = np.unique(source_data.get_labels(), return_counts=True)

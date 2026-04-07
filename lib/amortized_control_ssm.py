@@ -351,5 +351,4 @@ class ACSSM():
         mean, var = out
         return truth, mean
 
-    def adapt(self):
-        pass
+
