@@ -26,13 +26,7 @@ def match(domain):
     else:
         return 'AT1'
 
-def add_nosie(src_obs, trg_obs, noise_scale):
-    assert trg_obs.shape == src_obs.shape
-    trg_energy = trg_obs.pow(2).mean().sqrt()  # 全局 RMS
-    src_energy = src_obs.pow(2).mean(dim=(1, 2), keepdim=True).sqrt()  # 单样本 RMS
-    energy_ratio = trg_energy / (src_energy + 1e-8)
-    noise_pattern = trg_obs.mean(dim=0, keepdim=True) - src_obs.mean(dim=(1, 2), keepdim=True)
-    return src_obs + noise_pattern * noise_scale * energy_ratio
+
 
 class ACSSM():
     def __init__(self, args):
@@ -59,6 +53,14 @@ class ACSSM():
         self.cross_entropy = CrossEntropyLabelSmooth(args.num_classes, self.device, epsilon=0.1, )
         self.kl_loss = nn.KLDivLoss(reduction="mean")
 
+    def add_nosie(self, src_obs, trg_obs):
+        assert trg_obs.shape == src_obs.shape
+        trg_energy = trg_obs.pow(2).mean().sqrt()  # 全局 RMS
+        src_energy = src_obs.pow(2).mean(dim=(1, 2), keepdim=True).sqrt()  # 单样本 RMS
+        energy_ratio = trg_energy / (src_energy + 1e-8)
+        noise_pattern = trg_obs.mean(dim=0, keepdim=True) - src_obs.mean(dim=(1, 2), keepdim=True)
+        return src_obs + noise_pattern * self.noise_scale * energy_ratio
+
     def train_and_eval_adaptation(self, src_data_loader, trg_test_loder, trg_train_loader):
         assert self.dataset == 'timematch' and self.task == 'classification',"the function created for timematch classification"
         self.start_time = time.time()
@@ -82,9 +84,10 @@ class ACSSM():
                 trg_times = trg_data['inp_tid'].to(self.device)
                 trg_valid = trg_data['obs_valid'].to(self.device)
                 assert trg_obs.shape == src_obs.shape
-                src_obs = add_nosie(src_obs, src_times, self.noise_scale)
+                src_obs = self.add_nosie(src_obs, src_times)
 
                 self.optimizer.zero_grad()
+                # ACSSM api 输出隐状态
                 out, L_alpha = self.dynamics(src_obs, src_times, src_valid, mask_obs, n_samples=3, epoch=epoch)
                 mean, var = out
 

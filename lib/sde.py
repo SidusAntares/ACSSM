@@ -77,6 +77,14 @@ class LinearSDE(torch.nn.Module):
         self.M = nn.Linear(self.ld, self.ld, bias=False)
         self.M.apply(init_normal)
 
+        # hidden state output
+        self.last_hidden_state = None
+
+    def get_last_hidden_state(self):
+        if self.last_hidden_state is None:
+            raise ValueError("请先运行 forward()")
+        return self.last_hidden_state
+
     def get_matrix(self, alpha, obs_times, sigma=1):
         
         Identity = torch.ones(alpha.shape[-1], device=alpha.device)
@@ -128,7 +136,8 @@ class LinearSDE(torch.nn.Module):
         init_mean_var = torch.cat([init_mean, init_var], dim=0) 
         
         means, stds, alphas = self.parallel_compute(init_mean_var, self.E, Z, obs_times)
-        
+        self.last_hidden_state = means
+
         Z = torch.randn(size=(n_samples, *means.size())).to(means.device)
         Y = means + stds * Z
 
