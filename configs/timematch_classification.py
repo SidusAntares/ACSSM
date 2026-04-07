@@ -37,6 +37,8 @@ def get_timematch_classification_configs():
     config.test_ratio = 0.2
     config.combine_spring_and_winter = False
 
-
+    # TFMPTF
+    config.vmd_modes = 4
+    config.perm_dim = 4
 
     return config

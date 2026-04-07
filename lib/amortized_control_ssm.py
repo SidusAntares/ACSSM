@@ -16,6 +16,8 @@ from lib.losses import MSE_, GNLL_, BNLL_, CNLL_, F1_
 from lib.data_utils import adjust_obs_for_extrapolation
 from lib.utils import get_time
 
+from model.TFMPTF import TFMPTF
+
 def match(domain):
     if domain == 'france/30TXT/2017':
         return 'FR1'
@@ -52,6 +54,9 @@ class ACSSM():
         self.mse_loss = nn.MSELoss()
         self.cross_entropy = CrossEntropyLabelSmooth(args.num_classes, self.device, epsilon=0.1, )
         self.kl_loss = nn.KLDivLoss(reduction="mean")
+
+        # tfmptf
+        self.tfmptf = TFMPTF(args).to(self.device)
 
     def add_nosie(self, src_obs, trg_obs):
         assert trg_obs.shape == src_obs.shape
@@ -91,6 +96,10 @@ class ACSSM():
                 # ACSSM api 输出隐状态
                 out, L_alpha = self.dynamics(src_obs, src_times, src_valid, mask_obs, n_samples=3, epoch=epoch)
                 mean, var = out
+
+                hidden_states = self.dynamics.get_last_hidden_state()
+                with torch.no_grad():
+                    tfmptf_feat = self.tfmptf(hidden_states)
 
                 # Example loss
                 batch_len = truth.size(0)

@@ -1,171 +1,190 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from scipy.signal import hilbert
+import math
+from scipy.signal import windows
 
-
-class TFMPTF(nn.Module):
+class TFMPTF_Optimized(nn.Module):
     """
-    Time-Frequency Multi-scale Permutation Transition Feature (TFMPTF)
-
-    职责:
-        接收 ACSSM 输出的隐状态序列 H，通过 VMD 分解和排列模式分析，
-        构建时域 (TMPTM) 和频域 (FMPTM) 转移矩阵。
+    优化版 TFMPTF
+    优化点:
+        1. 向量化 _compute_tmptm，去除 Python 时间循环。
+        2. VMD 使用高斯窗平滑滤波，减少频谱泄露。
+        3. FMPTM 仅提取上三角特征，减少冗余。
     """
 
     def __init__(self, args):
-        super(TFMPTF, self).__init__()
+        super(TFMPTF_Optimized, self).__init__()
+        self.state_dim = args.state_dim
+        self.vmd_modes = args.vmd_modes
+        self.perm_dim = args.perm_dim
+        self.time_steps = args.T
 
-        # --- 超参数配置 ---
-        self.state_dim = args.state_dim  # 隐状态维度 (来自 ACSSM)
-        self.vmd_modes = args.vmd_modes  # VMD 分解的模态数量 K (例如 4)
-        self.perm_dim = args.perm_dim  # 排列模式的嵌入维度 m (例如 4)
-        self.time_steps = args.cut_time  # 时间步长 T (例如 50)
+        # 预计算阶乘，避免重复计算
+        self.max_patterns = math.factorial(self.perm_dim)
+        self.fact_cache = [math.factorial(i) for i in range(self.perm_dim)]
 
-        # --- 矩阵配置 ---
-        # 排列模式的最大数量是 m! (m的阶乘)
-        # 例如 m=4, max_patterns = 24
-        self.max_patterns = int(np.math.factorial(self.perm_dim))
+        # 预计算排列模式的所有可能排序 (加速 Lehmer Code 计算)
+        # shape: [max_patterns, perm_dim]
+        all_perms = np.array(list(self._generate_permutations(self.perm_dim)))
+        self.register_buffer('perm_table', torch.tensor(all_perms, dtype=torch.long))
 
-    def forward(self, hidden_states):
+    def _generate_permutations(self, m):
+        """递归生成全排列"""
+        if m == 1:
+            yield (0,)
+        else:
+            for p in self._generate_permutations(m - 1):
+                for i in range(m):
+                    yield p[:i] + (m - 1,) + p[i:]
+
+    def _get_permutation_pattern_fast(self, windows_data):
         """
-        前向传播主函数
-
+        向量化计算 Lehmer Code
         Args:
-            hidden_states: Tensor, 形状 [Batch, Time, State_Dim]
-                           来自 ACSSM 的隐状态 means
-
+            windows_data: np.array, shape [Num_Windows, m]
         Returns:
-            tfmptf_features: Tensor, 形状 [Batch, Feature_Dim]
-                             展平后的 TMPTM 和 FMPTM 特征
+            ids: np.array, shape [Num_Windows]
         """
-        batch_size, time_len, state_dim = hidden_states.shape
+        # 获取排序索引: argsort 返回的是每行从小到大的索引
+        # shape: [Num_Windows, m]
+        sort_indices = np.argsort(windows_data, axis=1)
 
-        # 确保输入形状符合预期
-        assert time_len == self.time_steps, f"输入时间长度 {time_len} 与配置 {self.time_steps} 不符"
+        ids = np.zeros(windows_data.shape[0], dtype=int)
 
-        # 初始化特征列表
-        all_features = []
+        # 计算逆序数 (Lehmer Code)
+        # 这里虽然还是循环 m，但 m 通常很小 (3, 4, 5)，外层的大循环已被向量化
+        for i in range(self.perm_dim):
+            # 统计后面有多少个比当前小
+            # sort_indices[:, i:i+1] shape: [N, 1]
+            # sort_indices[:, i+1:]   shape: [N, m-i-1]
+            if i < self.perm_dim - 1:
+                smaller_counts = np.sum(sort_indices[:, i:i+1] > sort_indices[:, i+1:], axis=1)
+                ids += smaller_counts * self.fact_cache[self.perm_dim - 1 - i]
 
-        # 遍历 Batch 中的每个样本
-        # 注意：VMD 和排列计算涉及复杂的循环逻辑，这里先采用 Python 循环处理
-        for i in range(batch_size):
-            sample_features = []
-
-            # 遍历每个状态通道 (State_Dim)
-            # 我们将每个通道视为独立的信号进行处理
-            for d in range(state_dim):
-                # 1. 获取单通道时序信号 [Time]
-                # 必须 detach 并转为 numpy，因为 VMD 目前不支持 autograd
-                signal = hidden_states[i, :, d].detach().cpu().numpy()
-
-                # 2. VMD 分解 -> 得到 [K, Time]
-                # 任务：将单通道信号分解为 K 个本征模态函数 (IMFs)
-                modes = self._vmd_decomposition(signal)
-
-                # 3. 计算 TMPTM (时域转移矩阵)
-                # 任务：在同一个模态内，统计排列模式随时间的转移概率
-                tmptm = self._compute_tmptm(modes)
-
-                # 4. 计算 FMPTM (频域/模态间转移矩阵)
-                # 任务：在同一时刻，统计不同模态之间的能量/数值关系转移
-                fmptm = self._compute_fmptm(modes)
-
-                # 5. 展平并收集特征
-                # 将矩阵展平为向量，准备拼接
-                sample_features.append(tmptm.flatten())
-                sample_features.append(fmptm.flatten())
-
-            # 合并当前样本的所有通道特征
-            sample_features = np.concatenate(sample_features)
-            all_features.append(sample_features)
-
-        # 转回 Tensor 并移到设备
-        # 注意：这里需要确保数据类型一致
-        return torch.tensor(np.array(all_features), dtype=torch.float32).to(hidden_states.device)
-
-    # =================================================================
-    # 方法实现区域
-    # =================================================================
+        return ids
 
     def _vmd_decomposition(self, signal):
         """
-        变分模态分解 (VMD)
-
-        任务:
-            将单通道信号分解为 K 个本征模态函数 (IMFs)。
-            用于分离不同频率成分。
-
-        Args:
-            signal: np.array, 形状 [Time]
-
-        Returns:
-            modes: np.array, 形状 [K, Time]
+        改进版 VMD (基于高斯窗的频域滤波)
         """
-        # TODO: 实现 VMD 算法
-        # 提示：
-        # 1. 可以使用 pyvmd 库 (pip install pyvmd)
-        # 2. 或者手动实现简单的模态分解逻辑
-        # 3. 如果为了简化，初期可以使用带通滤波组模拟 VMD 效果
-        pass
+        K = self.vmd_modes
+        N = len(signal)
+        if N < K * 2:
+            return np.tile(signal, (K, 1))
 
-    def _get_permutation_pattern(self, sub_sequence):
-        """
-        计算单个滑动窗口的排列模式
+        fft_signal = np.fft.fft(signal)
+        freqs = np.fft.fftfreq(N)
 
-        任务:
-            对窗口内的数值进行排序，返回其索引排列。
-            例如: [30, 10, 20] -> 排序后索引 [1, 2, 0] -> 映射为整数 ID (例如 5)
+        modes = np.zeros((K, N))
 
-        Args:
-            sub_sequence: np.array, 形状 [m] (滑动窗口切片)
+        # 使用高斯窗构建平滑的带通滤波器
+        # 宽度参数控制模态的带宽
+        bandwidth = 1.0 / K
 
-        Returns:
-            pattern_id: int, 排列模式的唯一标识 (0 到 m!-1)
-        """
-        # TODO: 实现排列模式编码
-        # 逻辑：
-        # 1. 使用 argsort 获取排序索引
-        # 2. 将索引序列映射为唯一的整数 ID (可以使用阶乘数制)
-        pass
+        for k in range(K):
+            center_freq = (k - K / 2) / K  # 中心化频率分布
+
+            # 高斯函数: exp(-0.5 * ((f - fc) / bw)^2)
+            # 注意处理周期性频率 (虽然对于低频模态影响不大)
+            dist = np.abs(freqs - center_freq)
+            # 考虑负频率的周期性距离 (简化处理，仅针对主频带)
+            mask = np.exp(-0.5 * (dist / bandwidth) ** 2)
+
+            # 归一化能量 (可选)
+            # mask /= np.sum(mask)
+
+            filtered_fft = fft_signal * mask
+            mode_k = np.real(np.fft.ifft(filtered_fft))
+            modes[k, :] = mode_k
+
+        return modes
 
     def _compute_tmptm(self, modes):
         """
-        构建时域排列转移矩阵 (TMPTM)
-
-        任务:
-            在同一个模态内，统计排列模式随时间的转移概率。
-            P(Pattern_t+1 | Pattern_t)
-
-        Args:
-            modes: np.array, 形状 [K, Time]
-
-        Returns:
-            tmptm: np.array, 形状 [max_patterns, max_patterns] (或简化版)
+        向量化版 TMPTM 计算
         """
-        # TODO: 实现 TMPTM 构建
-        # 逻辑：
-        # 1. 对每个模态计算时间序列的排列模式序列
-        # 2. 统计转移次数矩阵 (Count Matrix)
-        # 3. 归一化为概率矩阵 (Transition Probability Matrix)
-        pass
+        K, time_len = modes.shape
+        m = self.perm_dim
+        max_patterns = self.max_patterns
+
+        tmptm = np.zeros((max_patterns, max_patterns))
+
+        # 1. 构建滑动窗口矩阵 (使用 stride_tricks 避免内存复制)
+        # shape: [K, Num_Windows, m]
+        shape = (K, time_len - m + 1, m)
+        strides = (modes.strides[0], modes.strides[1], modes.strides[1])
+        windows_matrix = np.lib.stride_tricks.as_strided(modes, shape=shape, strides=strides)
+
+        # 2. 批量计算所有窗口、所有模态的 Pattern ID
+        # 重塑为 [K * Num_Windows, m] 进行计算
+        flat_windows = windows_matrix.reshape(-1, m)
+        flat_ids = self._get_permutation_pattern_fast(flat_windows)
+
+        # 3. 计算转移
+        num_windows = flat_ids.shape[0] // K
+        flat_ids = flat_ids.reshape(K, num_windows)
+
+        for k in range(K):
+            ids = flat_ids[k]
+            # 当前时刻 t 和下一时刻 t+1
+            curr_ids = ids[:-1]
+            next_ids = ids[1:]
+
+            # 使用 numpy 的 bincount 进行快速直方图统计
+            # 将二维坐标 (row, col) 映射到一维 index = row * N + col
+            linear_indices = curr_ids * max_patterns + next_ids
+            counts = np.bincount(linear_indices, minlength=max_patterns**2)
+
+            tmptm += counts.reshape(max_patterns, max_patterns)
+
+        # 4. 归一化
+        row_sums = tmptm.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1.0
+        return tmptm / row_sums
 
     def _compute_fmptm(self, modes):
         """
-        构建频域/模态间转移矩阵 (FMPTM)
-
-        任务:
-            在同一时刻，统计不同模态之间的能量或数值大小关系的转移。
-            捕捉频率分量之间的耦合关系。
-
-        Args:
-            modes: np.array, 形状 [K, Time]
-
-        Returns:
-            fmptm: np.array, 形状 [K, K] (或基于模态关系的矩阵)
+        精简版 FMPTM (只取上三角)
         """
-        # TODO: 实现 FMPTM 构建
-        # 逻辑：
-        # 1. 计算每个时刻各模态的能量/幅值
-        # 2. 构建模态间的转移或相关性矩阵
-        pass
+        K = modes.shape[0]
+        energies = modes ** 2
+
+        try:
+            corr_matrix = np.corrcoef(energies)
+            corr_matrix = np.nan_to_num(corr_matrix, nan=0.0)
+        except:
+            corr_matrix = np.eye(K)
+
+        # 只提取上三角部分 (不含对角线，因为对角线恒为1，无信息量)
+        # 或者包含对角线，视具体需求而定
+        triu_indices = np.triu_indices(K, k=1)
+        return corr_matrix[triu_indices]
+
+    def forward(self, hidden_states):
+        batch_size = hidden_states.shape[0]
+        all_features = []
+
+        # 为了演示，这里保持 Batch 循环 (Batch 较小时不可避免)
+        for i in range(batch_size):
+            sample_feats = []
+            signal_data = hidden_states[i].detach().cpu().numpy()
+
+            for d in range(self.state_dim):
+                signal = signal_data[:, d]
+                modes = self._vmd_decomposition(signal)
+
+                tmptm = self._compute_tmptm(modes)
+                fmptm_vec = self._compute_fmptm(modes)
+
+                # 策略调整：
+                # 1. TMPTM 也可以只取上三角或特定统计量，防止维度过大
+                # 这里假设 max_patterns=24，24*24=576 维，尚可接受
+                sample_feats.append(tmptm.flatten())
+                sample_feats.append(fmptm_vec)
+
+            # 拼接所有通道
+            final_vec = np.concatenate(sample_feats)
+            all_features.append(final_vec)
+
+        return torch.tensor(np.array(all_features), dtype=torch.float32).to(hidden_states.device)
