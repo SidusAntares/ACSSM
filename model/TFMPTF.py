@@ -4,7 +4,7 @@ import numpy as np
 import math
 from scipy.signal import windows
 
-class TFMPTF_Optimized(nn.Module):
+class TFMPTF(nn.Module):
     """
     优化版 TFMPTF
     优化点:
@@ -14,7 +14,7 @@ class TFMPTF_Optimized(nn.Module):
     """
 
     def __init__(self, args):
-        super(TFMPTF_Optimized, self).__init__()
+        super(TFMPTF, self).__init__()
         self.state_dim = args.state_dim
         self.vmd_modes = args.vmd_modes
         self.perm_dim = args.perm_dim

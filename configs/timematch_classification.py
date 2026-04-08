@@ -31,7 +31,7 @@ def get_timematch_classification_configs():
     # TimeMatch 特有参数（会被 parser 覆盖）
     # config.data_root = '/data/user/DBL/timematch_data'
     config.data_root = '/mnt/d/All_Documents/documents/ViT/dataset/timematch'
-    config.seq_length = -1
+    config.seq_length = 30
     config.num_pixels = 1
     config.val_ratio = 0.1
     config.test_ratio = 0.2
