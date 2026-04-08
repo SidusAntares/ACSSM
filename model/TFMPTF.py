@@ -28,6 +28,8 @@ class TFMPTF(nn.Module):
         # shape: [max_patterns, perm_dim]
         all_perms = np.array(list(self._generate_permutations(self.perm_dim)))
         self.register_buffer('perm_table', torch.tensor(all_perms, dtype=torch.long))
+        self.register_buffer("matrix_size", torch.tensor(self.max_patterns, dtype=torch.int))
+        self.register_buffer("matrix_num", torch.tensor(2, dtype=torch.int))
 
     def _generate_permutations(self, m):
         """递归生成全排列"""
@@ -165,26 +167,28 @@ class TFMPTF(nn.Module):
         batch_size = hidden_states.shape[0]
         all_features = []
 
-        # 为了演示，这里保持 Batch 循环 (Batch 较小时不可避免)
+        matrix_num = 0
         for i in range(batch_size):
             sample_feats = []
             signal_data = hidden_states[i].detach().cpu().numpy()
 
             for d in range(self.state_dim):
                 signal = signal_data[:, d]
-                modes = self._vmd_decomposition(signal)
+                modes = self._vmd_decomposition(signal) # vmd分解模态
 
-                tmptm = self._compute_tmptm(modes)
-                fmptm_vec = self._compute_fmptm(modes)
+                tmptm = self._compute_tmptm(modes) # 计算 TMPTM 分析每个模态时间变化关系
+                fmptm_vec = self._compute_fmptm(modes) # 计算 FMPTM 分析模态之间的关系
 
-                # 策略调整：
-                # 1. TMPTM 也可以只取上三角或特定统计量，防止维度过大
-                # 这里假设 max_patterns=24，24*24=576 维，尚可接受
+
                 sample_feats.append(tmptm.flatten())
                 sample_feats.append(fmptm_vec)
 
-            # 拼接所有通道
-            final_vec = np.concatenate(sample_feats)
+            if not i:
+                matrix_num = len(sample_feats)//self.state_dim
+
+            final_vec = np.concatenate(sample_feats) # 首尾相连
             all_features.append(final_vec)
 
+        if self.matrix_num.item() != matrix_num:
+            self.register_buffer("matrix_num", torch.tensor(matrix_num, dtype=torch.int))
         return torch.tensor(np.array(all_features), dtype=torch.float32).to(hidden_states.device)
