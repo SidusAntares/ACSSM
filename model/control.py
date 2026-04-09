@@ -154,6 +154,7 @@ class Decoder(nn.Module):
         self.dataset = args.dataset
         self.task = args.task
         self.ld = args.state_dim
+        self.moco_dim = args.moco_dim
         self.od= args.out_dim
         
         
@@ -202,9 +203,9 @@ class Decoder(nn.Module):
         elif self.dataset == 'timematch':
             # TimeMatch 是分类任务，输出维度 = num_classes
             self.decoder = nn.Sequential(
-                nn.Linear(self.ld, self.ld),
+                nn.Linear(self.moco_dim, self.moco_dim),
                 nn.ReLU(),
-                nn.Linear(self.ld, self.od)  # od = num_classes
+                nn.Linear(self.moco_dim, self.od)  # od = num_classes
             )
     def forward(self, input):
         

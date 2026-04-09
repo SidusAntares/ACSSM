@@ -18,10 +18,16 @@ class TFMPTF(nn.Module):
         self.state_dim = args.state_dim
         self.vmd_modes = args.vmd_modes
         self.perm_dim = args.perm_dim
-        self.time_steps = args.T
+        self.num_groups = args.num_groups
+        assert self.state_dim % self.num_groups == 0
+        self.state = self.state_dim // self.num_groups
+
+        self.matrix_num = 2
 
         # 预计算阶乘，避免重复计算
         self.max_patterns = math.factorial(self.perm_dim)
+        self.tmptm_dim = self.max_patterns ** 2  # 576
+        self.fmptm_dim = self.vmd_modes * (self.vmd_modes - 1) // 2
         self.fact_cache = [math.factorial(i) for i in range(self.perm_dim)]
 
         # 预计算排列模式的所有可能排序 (加速 Lehmer Code 计算)
@@ -29,7 +35,7 @@ class TFMPTF(nn.Module):
         all_perms = np.array(list(self._generate_permutations(self.perm_dim)))
         self.register_buffer('perm_table', torch.tensor(all_perms, dtype=torch.long))
         self.register_buffer("matrix_size", torch.tensor(self.max_patterns, dtype=torch.int))
-        self.register_buffer("matrix_num", torch.tensor(2, dtype=torch.int))
+
 
     def _generate_permutations(self, m):
         """递归生成全排列"""
@@ -48,18 +54,11 @@ class TFMPTF(nn.Module):
         Returns:
             ids: np.array, shape [Num_Windows]
         """
-        # 获取排序索引: argsort 返回的是每行从小到大的索引
-        # shape: [Num_Windows, m]
         sort_indices = np.argsort(windows_data, axis=1)
 
         ids = np.zeros(windows_data.shape[0], dtype=int)
 
-        # 计算逆序数 (Lehmer Code)
-        # 这里虽然还是循环 m，但 m 通常很小 (3, 4, 5)，外层的大循环已被向量化
         for i in range(self.perm_dim):
-            # 统计后面有多少个比当前小
-            # sort_indices[:, i:i+1] shape: [N, 1]
-            # sort_indices[:, i+1:]   shape: [N, m-i-1]
             if i < self.perm_dim - 1:
                 smaller_counts = np.sum(sort_indices[:, i:i+1] > sort_indices[:, i+1:], axis=1)
                 ids += smaller_counts * self.fact_cache[self.perm_dim - 1 - i]
@@ -87,10 +86,8 @@ class TFMPTF(nn.Module):
         for k in range(K):
             center_freq = (k - K / 2) / K  # 中心化频率分布
 
-            # 高斯函数: exp(-0.5 * ((f - fc) / bw)^2)
-            # 注意处理周期性频率 (虽然对于低频模态影响不大)
             dist = np.abs(freqs - center_freq)
-            # 考虑负频率的周期性距离 (简化处理，仅针对主频带)
+
             mask = np.exp(-0.5 * (dist / bandwidth) ** 2)
 
             # 归一化能量 (可选)
@@ -164,31 +161,54 @@ class TFMPTF(nn.Module):
         return corr_matrix[triu_indices]
 
     def forward(self, hidden_states):
-        batch_size = hidden_states.shape[0]
-        all_features = []
+        batch_size, time_steps, state_dim = hidden_states.shape
 
-        matrix_num = 0
-        for i in range(batch_size):
-            sample_feats = []
-            signal_data = hidden_states[i].detach().cpu().numpy()
+        # 分离计算，避免内存爆炸
+        group_tmptm_list = []
+        group_fmptm_list = []
 
-            for d in range(self.state_dim):
-                signal = signal_data[:, d]
-                modes = self._vmd_decomposition(signal) # vmd分解模态
+        # 分组处理
+        for g in range(self.num_groups):
+            start_idx = g * self.state
+            end_idx = start_idx + self.state
+            group_data = hidden_states[:, :, start_idx:end_idx]  # [B, T, 16]
 
-                tmptm = self._compute_tmptm(modes) # 计算 TMPTM 分析每个模态时间变化关系
-                fmptm_vec = self._compute_fmptm(modes) # 计算 FMPTM 分析模态之间的关系
+            # 组内平均池化（在state维度）
+            group_pooled = group_data.mean(dim=2)  # [B, T]
 
+            batch_tmptm = []
+            batch_fmptm = []
 
-                sample_feats.append(tmptm.flatten())
-                sample_feats.append(fmptm_vec)
+            # 对每个样本计算TFMPTF特征
+            for b in range(batch_size):
+                signal = group_pooled[b].detach().cpu().numpy()  # [T]
 
-            if not i:
-                matrix_num = len(sample_feats)//self.state_dim
+                # VMD分解
+                modes = self._vmd_decomposition(signal)  # [vmd_modes, T]
 
-            final_vec = np.concatenate(sample_feats) # 首尾相连
-            all_features.append(final_vec)
+                # 计算TMPTM
+                tmptm = self._compute_tmptm(modes).flatten()  # [576]
 
-        if self.matrix_num.item() != matrix_num:
-            self.register_buffer("matrix_num", torch.tensor(matrix_num, dtype=torch.int))
-        return torch.tensor(np.array(all_features), dtype=torch.float32).to(hidden_states.device)
+                # 计算FMPTM
+                fmptm_vec = self._compute_fmptm(modes)  # [6]
+
+                batch_tmptm.append(tmptm)
+                batch_fmptm.append(fmptm_vec)
+
+            # 转换为tensor
+            tmptm_tensor = torch.tensor(np.array(batch_tmptm),
+                                        dtype=torch.float32).to(hidden_states.device)
+            fmptm_tensor = torch.tensor(np.array(batch_fmptm),
+                                        dtype=torch.float32).to(hidden_states.device)
+
+            group_tmptm_list.append(tmptm_tensor.unsqueeze(1))  # [B, 1, 576]
+            group_fmptm_list.append(fmptm_tensor.unsqueeze(1))  # [B, 1, 6]
+
+        # 拼接所有组
+        group_tmptm = torch.cat(group_tmptm_list, dim=1)  # [B, 32, 576]
+        group_fmptm = torch.cat(group_fmptm_list, dim=1)  # [B, 32, 6]
+
+        return {
+            'group_tmptm': group_tmptm,  # [B, 32, 576]
+            'group_fmptm': group_fmptm  # [B, 32, 6]
+        }

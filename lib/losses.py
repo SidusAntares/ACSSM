@@ -5,6 +5,7 @@ Authors: Mona Schirmer, Mazin Eltayeb, Stefan Lessmann and Maja Rudolph (ICML 20
 """
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from einops import repeat, rearrange
 from sklearn.metrics import f1_score
@@ -12,6 +13,11 @@ from sklearn.metrics import f1_score
 
 def CNLL_(targets, predictions):
     b = targets.size(0)
+    if len(predictions.size()) == 2:
+        loss = F.cross_entropy(predictions, targets, reduction='sum')
+        preds = predictions.argmax(-1)
+        acc = (preds == targets).float().sum()  # 直接返回正确数
+        return loss, acc
     if len(predictions.size()) != 4:
         predictions = rearrange(predictions, 'b t d -> 1 b t d')
     targets = repeat(targets, 'b t -> n b t', n=predictions.size(0))
@@ -27,6 +33,14 @@ def CNLL_(targets, predictions):
 
 def F1_(targets, predictions, average='macro', zero_division=0):
     # Ensure predictions is 4D: (N, B, T, C)
+    if predictions.dim() == 2:
+        if targets.dim() > 1:
+            targets = targets.squeeze(-1)  # [B, 1] → [B]
+        pred_labels = torch.argmax(predictions, dim=1)  # [B]
+        y_true = targets.cpu().numpy()
+        y_pred = pred_labels.cpu().numpy()
+        f1 = f1_score(y_true, y_pred, average=average, zero_division=zero_division)
+        return f1
     if len(predictions.shape) == 3:
         predictions = rearrange(predictions, 'b t c -> 1 b t c')
     elif len(predictions.shape) != 4:

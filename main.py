@@ -9,14 +9,14 @@ from dataset import PixelSetData
 
 from lib.data_utils import load_data
 from lib.utils import set_seed, count_parameters
-from lib.amortized_control_ssm import ACSSM
+# from lib.amortized_control_ssm import ACSSM
+from lib.acssm import ACSSM
 from timematch_utils import label_utils
 from timematch_utils.train_utils import bool_flag
 
 parser = argparse.ArgumentParser('ACSSM')
 parser.add_argument('--info_type', type=str, default="full", help="Assimilation type to encode the information")
 parser.add_argument('--cut-time', type=int, default=None, help='Timepoint at which extrapolation starts.')
-parser.add_argument('-b', '--batch-size', type=int, default=None, help="Batch size for training and test set.")
 parser.add_argument('--task', type=str, default=None, help="Target task.")
 parser.add_argument('--sample-rate', type=float, default=None, help='Sample time points to increase irregularity of timestamps. For example, if sample_rate=0.5 half of the time points are discarded at random in the data preprocessing.')
 parser.add_argument('--impute-rate', type=float, default=None, help='Remove time points for interpolation. For example, if impute_rate=0.3 the model is given 70% of the time points and tasked to reconstruct the entire series.')
@@ -44,11 +44,11 @@ parser.add_argument('--data_root', type=str, default='/mnt/d/All_Documents/docum
 # timamatch
 parser.add_argument("--gpu", type=int, default=0, help="GPU device")
 
-parser.add_argument('--batch_size', type=int, default=500, help='Batch size for training.')
-parser.add_argument('--balance_source', type=bool_flag, default=False, help='Use class balanced batches for source.')
+parser.add_argument('--batch_size', type=int, default=None, help='Batch size for training.')
+parser.add_argument('--balance_source', type=bool_flag, default=True, help='Use class balanced batches for source.')
 
 parser.add_argument('--source', default='france/30TXT/2017', type=str, help='Source domain.')
-parser.add_argument('--target', default='france/30TXT/2017', type=str)
+parser.add_argument('--target', default="france/31TCJ/2017", type=str)
 parser.add_argument('--num_folds', default=1, type=int, help='Number of cross-validation folds.')
 
 parser.add_argument('--with_shift_aug', default=True, action='store_true',
@@ -58,7 +58,21 @@ parser.add_argument('--shift_aug_p', default=1.0, type=float,
 parser.add_argument('--max_shift_aug', default=60, type=int,
                     help='highest shift to apply for temporal shift augmentation')
 parser.add_argument('--seed', default=111, type=int)
-parser.add_argument('--classes')
+
+# TFMPTF
+parser.add_argument('--vmd_modes', default=None, type=int)
+parser.add_argument('--perm_dim', default=None, type=int)
+parser.add_argument('--num_groups', default=None, type=int)
+
+# Adaptation
+parser.add_argument('--center_momentum', default=None, type=float)
+parser.add_argument('--lambda_align', default=None, type=float)
+parser.add_argument('--lambda_ctr', default=None, type=float)
+
+# moco
+parser.add_argument('--moco_dim', default=None, type=float)
+parser.add_argument('--queue_size', default=None, type=float)
+parser.add_argument('--moco_momentum', default=None, type=float)
 
 # innovation
 parser.add_argument('--ns', default=0.01, type=float)
@@ -114,8 +128,11 @@ def main(args):
     # wandb.init(project="acssm", config=args, save_code=True, mode="offline",
     #            name=f'{args.problem_name}')
     #wandb sync同步日志
-    print(f"# param of model: {count_parameters(run.dynamics)}")
-    train_dl, valid_dl, trg_train_loader = load_data(args)
-    run.train_and_eval_adaptation(train_dl, valid_dl, trg_train_loader)
+    param = count_parameters(run.dynamics) + count_parameters(run.decoder) + count_parameters(run.dynamics)+ count_parameters(run.aligner) + count_parameters(run.contrastive_learner)
+    print(f"# param of model: {param}")
+    src_train_loader, src_test_loader, trg_train_loader, trg_test_loader = load_data(args)
+    run.train_and_eval_adaptation(src_train_loader, src_test_loader, trg_train_loader, trg_test_loader)
+    if args.source != args.target:
+        run.adaptation(src_train_loader, trg_train_loader, trg_test_loader)
     
 main(args)

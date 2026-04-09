@@ -67,7 +67,7 @@ class LinearSDE(torch.nn.Module):
         
         ### History encoder
         self.encoder = Transformer_Encoder(args)
-        self.decoder = Decoder(args)
+        # self.decoder = Decoder(args)
         
 
         self.B = nn.Linear(self.ld, self.ld, bias=False)
@@ -77,13 +77,7 @@ class LinearSDE(torch.nn.Module):
         self.M = nn.Linear(self.ld, self.ld, bias=False)
         self.M.apply(init_normal)
 
-        # hidden state output
-        self.last_hidden_state = None
 
-    def get_last_hidden_state(self):
-        if self.last_hidden_state is None:
-            raise ValueError("请先运行 forward()")
-        return self.last_hidden_state
 
     def get_matrix(self, alpha, obs_times, sigma=1):
         
@@ -136,19 +130,18 @@ class LinearSDE(torch.nn.Module):
         init_mean_var = torch.cat([init_mean, init_var], dim=0) 
         
         means, stds, alphas = self.parallel_compute(init_mean_var, self.E, Z, obs_times)
-        self.last_hidden_state = means
 
         Z = torch.randn(size=(n_samples, *means.size())).to(means.device)
         Y = means + stds * Z
 
         observed_stamps = obs_valid[..., None]
-        
-        neg_log_potential = GNLL_(y_observed * observed_stamps, means * observed_stamps, stds**2, eps=1.)
-        KLs =  0.5 * (alphas[:, :-1].pow(2) * (obs_times[:, 1:] - obs_times[:, :-1])).mean(0).sum() 
-        L_alpha = self.lamda_1 * KLs + self.lamda_2 * neg_log_potential
 
-        mean_out = self.decoder(Y) # Instead of directly decoding y_observed, we decode the samples sampled from controlled latent states.
-        var_out = 0.01 * torch.ones_like(mean_out)
-        
-        return (mean_out, var_out), L_alpha
+        neg_log_potential = GNLL_(y_observed * observed_stamps, means * observed_stamps, stds**2, eps=1.)
+        KLs =  0.5 * (alphas[:, :-1].pow(2) * (obs_times[:, 1:] - obs_times[:, :-1])).mean(0).sum()
+        L_alpha = self.lamda_1 * KLs + self.lamda_2 * neg_log_potential
+        return means, L_alpha
+        # mean_out = self.decoder(Y) # Instead of directly decoding y_observed, we decode the samples sampled from controlled latent states.
+        # var_out = 0.01 * torch.ones_like(mean_out)
+        #
+        # return (mean_out, var_out), L_alpha
     

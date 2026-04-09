@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from tfda.models import AdEncoder
+
 
 class GradientReversalFunction(torch.autograd.Function):
     """
@@ -34,26 +36,20 @@ class TFDA(nn.Module):
         通过对抗训练学习域不变特征。
     """
 
-    def __init__(self, args):
+    def __init__(self, tfmptf, args):
         super(TFDA, self).__init__()
 
         # --- 输入配置 ---
-        self.matrix_size = args.mtf_matrix_size  # TFMPTF 输出矩阵的大小 (例如 24)
-        self.input_channels = args.mtf_input_channels  # 通道数 (TMPTM + FMPTM)
+        self.matrix_size = tfmptf.matrix_size.item()  # TFMPTF 输出矩阵的大小
+        self.matrix_num = tfmptf.matrix_num.item()  # 通道数 (TMPTM + FMPTM)
+        self.input_channels = tfmptf.state_dim * self.matrix_num
+        self.state_dim = tfmptf.state_dim
+        self.fmptm_len = tfmptf.fmptm_len
 
         # --- 特征头 (Feature Head) ---
         # 职责: 将二维矩阵特征展平并映射为高维向量
         # 使用卷积层提取局部特征，然后展平
-        self.feature_head = nn.Sequential(
-            nn.Conv2d(self.input_channels, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((4, 4)),  # 统一输出尺寸
-            nn.Flatten(),
-            nn.Linear(32 * 16, 256),
-            nn.ReLU(),
-            nn.Dropout(0.5)
-        )
+        self.feature_head = AdEncoder(args, self.matrix_size, self.state_dim, self.matrix_num, self.fmptm_len)
 
         # --- 分类器 (Classifier) ---
         # 职责: 预测样本的类别标签 (用于源域监督)

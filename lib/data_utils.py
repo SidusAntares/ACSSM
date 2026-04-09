@@ -37,6 +37,7 @@ def load_data(args):
     
     # Pendulum
     trg_train_loader = None
+    trg_test_loader = None
     if args.dataset == 'pendulum':
         
         if args.task == 'interpolation':
@@ -100,9 +101,8 @@ def load_data(args):
 
     #  timematch
     elif args.dataset == 'timematch':
-        train_dl, valid_dl, trg_train_loader = load_data_timematch(args)  # treat args as config
-
-    return train_dl, valid_dl, trg_train_loader
+        train_dl, valid_dl, trg_train_loader, trg_test_loader = load_data_timematch(args)  # treat args as config
+    return train_dl, valid_dl, trg_train_loader, trg_test_loader
 
 
 class Pendulum_interpolation(Dataset):
@@ -538,5 +538,6 @@ def load_data_timematch(config):
     splits = folds[0]
 
     src_train_loader, trg_train_loader = get_data_loaders(splits, config)
-    _, test_loader = create_evaluation_loaders(config.target, splits, config)
-    return src_train_loader, test_loader, trg_train_loader
+    _, src_test_loader = create_evaluation_loaders(config.source, splits, config)
+    _, trg_test_loader = create_evaluation_loaders(config.target, splits, config)
+    return src_train_loader, src_test_loader, trg_train_loader, trg_test_loader

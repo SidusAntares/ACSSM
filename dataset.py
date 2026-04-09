@@ -92,7 +92,8 @@ class PixelSetData(data.Dataset):
             'inp_obs': torch.as_tensor(sample['pixels'], dtype=torch.float32),  # [T, C] 输入观测
             'evd_obs': torch.as_tensor(sample['pixels'], dtype=torch.float32),  # dummy target 重建目标用于计算loss
             'inp_tid': torch.as_tensor(sample['positions'], dtype=torch.float32),  # [T]
-            'aux_obs': torch.full((T,), sample['label'], dtype=torch.long),  # scalar label
+            # 'aux_obs': torch.full((T,), sample['label'], dtype=torch.long),  # scalar label
+            'aux_obs': torch.as_tensor(sample['label'], dtype=torch.long),  # scalar label
             'obs_valid': sample['valid_pixels'].squeeze(-1) ,  # [T]
             'mask_obs': torch.ones(T, C, dtype=torch.bool),  # [T, C]
             'mask_truth': torch.ones(T, C, dtype=torch.bool),  # [T, C]
