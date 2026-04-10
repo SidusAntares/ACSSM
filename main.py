@@ -10,8 +10,10 @@ from dataset import PixelSetData
 from lib.data_utils import load_data
 # from lib.data_utils_try import load_data
 from lib.utils import set_seed, count_parameters
-# from lib.amortized_control_ssm import ACSSM
-from lib.acssm import ACSSM
+from lib.amortized_control_ssm import ACSSM
+from lib.acssm import ACSSM as v1
+from lib.acssm2 import ACSSM as v2
+from lib.acssm3 import ACSSM as v3
 from timematch_utils import label_utils
 from timematch_utils.train_utils import bool_flag
 
@@ -38,9 +40,10 @@ parser.add_argument('--num-basis', type=int, default=None, help="Number of basis
 
 parser.add_argument('--problem_name', type=str, default='timematch_classification', help="Problem to solve")
 parser.add_argument('--dataset', type=str, default='timematch', help="Dataset to use. Available datasets are physionet, ushcn and pendulum.")
-parser.add_argument('--data_root', type=str, default='/mnt/d/All_Documents/documents/ViT/dataset/timematch', help="Dataset to use. Available datasets are physionet, ushcn and pendulum.")
-# parser.add_argument('--data_root', default='/data/user/DBL/timematch_data', type=str,
-#                         help='Path to datasets root directory.')
+# parser.add_argument('--data_root', type=str, default='/mnt/d/All_Documents/documents/ViT/dataset/timematch', help="Dataset to use. Available datasets are physionet, ushcn and pendulum.")
+parser.add_argument('--data_root', default='/data/user/DBL/timematch_data', type=str,
+                        help='Path to datasets root directory.')
+parser.add_argument("--version", type=int, default=0)
 
 # timamatch
 parser.add_argument("--gpu", type=int, default=0, help="GPU device")
@@ -123,17 +126,26 @@ def main(args):
     # ========= print options =========
     for o in vars(args):
         print("#", o, ":", getattr(args, o))
-    run = ACSSM(args)
+    if args.version == 0:
+        run = ACSSM(args)
+    elif args.version == 1:
+        run = v1(args)
+    elif args.version == 2:
+        run = v2(args)
+    elif args.version == 3:
+        run = v3(args)
+    else:
+        raise ValueError("Unknown version.")
     # wandb.init(project="acssm", config=args, save_code=True, mode="online",
     #            name=f'{args.problem_name}')
     # wandb.init(project="acssm", config=args, save_code=True, mode="offline",
     #            name=f'{args.problem_name}')
     #wandb sync同步日志
-    param = count_parameters(run.dynamics) #+ count_parameters(run.decoder) + count_parameters(run.gate)+ count_parameters(run.aligner) + count_parameters(run.contrastive_learner)
+    param = count_parameters(run.dynamics) + count_parameters(run.decoder) # + count_parameters(run.gate)+ count_parameters(run.aligner) + count_parameters(run.contrastive_learner)
     print(f"# param of model: {param}")
     src_train_loader, src_test_loader, trg_train_loader, trg_test_loader = load_data(args)
     run.train_and_eval_adaptation(src_train_loader, src_test_loader, trg_train_loader, trg_test_loader)
     if args.source != args.target:
         run.adaptation(src_train_loader, trg_train_loader, trg_test_loader)
-    
+
 main(args)

@@ -14,7 +14,7 @@ import torch.nn.functional as F
 now = datetime.now()
 run_id = now.strftime("%Y%m%d_%H%M%S_%f")[:-3]
 
-import lib.sde as sde
+import lib.sde2 as sde
 from lib.losses import MSE_, GNLL_, BNLL_, CNLL_, F1_
 from lib.data_utils import adjust_obs_for_extrapolation
 from lib.utils import get_time
@@ -29,6 +29,60 @@ def match(domain):
         return 'DK1'
     else:
         return 'AT1'
+
+def lyap_loss(src_lyap, trg_lyap, min_bins=5, max_bins=20, min_range=0.1):
+    src_lyap = src_lyap.float()
+    trg_lyap = trg_lyap.float()
+
+    # 动态范围计算（使用detach避免梯度传播）
+    with torch.no_grad():
+        src_max = src_lyap.abs().max().item()
+        trg_max = trg_lyap.abs().max().item()
+        dynamic_range = max(src_max, trg_max, min_range)
+
+        # 自适应bins计算（基于数据量）
+        total_elements = min(src_lyap.numel(), trg_lyap.numel())
+        adaptive_bins = max(min_bins, min(max_bins, total_elements // 1000))
+        num_bins = max(adaptive_bins, min_bins)  # 确保至少有最小bins数
+
+    # 直方图计算
+    src_lyap_dist = torch.histc(
+        src_lyap.abs().flatten().detach(),  # detach避免不必要的梯度计算
+        bins=num_bins,
+        min=0,
+        max=dynamic_range
+    )
+    trg_lyap_dist = torch.histc(
+        trg_lyap.abs().flatten().detach(),
+        bins=num_bins,
+        min=0,
+        max=dynamic_range
+    )
+
+    # 数值稳定性：添加小常数防止除零
+    eps = 1e-8
+    src_lyap_dist = src_lyap_dist + eps
+    trg_lyap_dist = trg_lyap_dist + eps
+
+    # 归一化为概率分布
+    src_lyap_dist = src_lyap_dist / src_lyap_dist.sum()
+    trg_lyap_dist = trg_lyap_dist / trg_lyap_dist.sum()
+
+    # 计算累积分布函数（CDF）
+    src_cum = torch.cumsum(src_lyap_dist, dim=0)
+    trg_cum = torch.cumsum(trg_lyap_dist, dim=0)
+
+    # 1D Wasserstein距离（Earth Mover's Distance）
+    wasserstein_dist = torch.sum(torch.abs(src_cum - trg_cum))
+
+    # 缩放因子：将离散距离映射到连续空间
+    bin_width = dynamic_range / num_bins
+    dyn_loss = wasserstein_dist * bin_width
+
+    # 添加小的正则化项确保数值稳定性
+    dyn_loss = dyn_loss + 1e-6 * (src_lyap.abs().mean() + trg_lyap.abs().mean())
+
+    return dyn_loss
 
 
 class Decoder(nn.Module):
@@ -89,29 +143,11 @@ class ACSSM():
         self.lambda_align = args.lambda_align
         # self.momentum_classifier = Decoder(args).to(self.device)
 
-        self.aligner = ClassCenterAligner(
-            num_classes=args.num_classes,
-            feature_dim=args.moco_dim,
-            device=args.device,
-            momentum=args.center_momentum,
-            alignment_weight=args.lambda_align
-        ).to(self.device)
-        self.contrastive_learner = AdaMoCo3D(
-            feature_dim=args.moco_dim,  # 128
-            num_classes=args.num_classes,
-            queue_size=args.batch_size * 256,
-            temperature=0.07,
-            momentum=args.moco_momentum,
-            contrast_mode = 'group_wise'
-        ).to(self.device)
-
         self.optimizer = torch.optim.AdamW(
             list(self.dynamics.parameters()) +
             list(self.decoder.parameters()),
             lr=args.lr, weight_decay=args.wd)
         self.adaptation_optimizer = torch.optim.AdamW(
-            list(self.contrastive_learner.parameters()) +
-            list(self.aligner.parameters()) +
             list(self.decoder.parameters()),
             lr=args.lr,
             weight_decay=args.wd
@@ -159,6 +195,7 @@ class ACSSM():
                 loss.backward()
 
                 nn.utils.clip_grad_norm_(self.dynamics.parameters(), 1)
+                nn.utils.clip_grad_norm_(self.decoder.parameters(), 1)
                 self.optimizer.step()
 
                 epoch_mse += train_mse.item()
@@ -196,9 +233,9 @@ class ACSSM():
                     'dynamics_state_dict': self.dynamics.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
                 },
-                    f'./checkpoints/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}/{run_id}_{self.seed}_{self.noise_scale}/v2/pretrain_{epoch + 1}.pt')
+                    f'./checkpoints/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}/{run_id}_{self.seed}_{self.noise_scale}/v3/pretrain_{epoch + 1}.pt')
         log_df = pd.DataFrame(self.log_history)
-        csv_path = f"./adapttaion_logs/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}/{run_id}_{self.seed}_{self.noise_scale}/v2/pretrain_{epoch + 1}.csv"
+        csv_path = f"./adapttaion_logs/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}/{run_id}_{self.seed}_{self.noise_scale}/v3/pretrain_{epoch + 1}.csv"
         os.makedirs(os.path.dirname(csv_path), exist_ok=True)
         log_df.to_csv(csv_path, index=False)
         print(f"Training log saved to {csv_path}")
@@ -212,8 +249,11 @@ class ACSSM():
             checkpoint = torch.load(load_source_checkpoint)
             self.dynamics.load_state_dict(checkpoint['model_state_dict'])
             print(f"✓ Loaded source model from {load_source_checkpoint}")
-        for param in self.dynamics.parameters():
-            param.requires_grad = False
+        for name, param in self.dynamics.named_parameters():
+            if 'coeff_net' in name or 'D' in name:  # 冻结动态核心
+                param.requires_grad = False
+            else:
+                param.requires_grad = True  # 保持编码器可训练
 
         for epoch in range(self.n_epoch):
             epoch_ll = 0
@@ -222,9 +262,6 @@ class ACSSM():
             epoch_ctr_loss = 0
             epoch_align_loss = 0
             num_data = 0
-
-            self.contrastive_learner.train()
-            self.aligner.train()
 
             for _, (src_data, trg_data) in enumerate(zip(src_train_loader, trg_train_loader)):
                 src_obs = src_data['inp_obs'].to(self.device)
@@ -251,33 +288,32 @@ class ACSSM():
                         trg_obs, trg_times, trg_valid, None,
                         n_samples=3, epoch=None
                     )
+                with torch.no_grad():
+                    src_lyap = self.dynamics.alphas[:, 1:] - self.dynamics.alphas[:, :-1]  # 源域
+                    trg_lyap = self.dynamics.alphas[:, 1:] - self.dynamics.alphas[:, :-1]  # 目标域
+                dyn_loss = lyap_loss(src_lyap, trg_lyap, min_bins=8, max_bins=25)
+                with torch.no_grad():
+                    dyn_weight = 0.5 * (1 - torch.exp(-epoch / 10))
 
-                # 对比损失
-                loss_ctr, _ = self.contrastive_learner(
-                    fused_q=src_feat,
-                    fused_k=trg_feat.detach(),
-                    labels=src_labels
-                )
                 logits_src = self.decoder(src_feat)
                 logits_trg = self.decoder(trg_feat)
-                # loss_cls = F.cross_entropy(logits_src, src_labels.squeeze())
                 train_nll, _ = CNLL_(src_labels, logits_src)
                 loss_cls = train_nll  # + L_alpha
+                loss = loss_cls + dyn_weight * dyn_loss
 
-                pseudo_labels_src = torch.argmax(logits_src, dim=2)
-                pseudo_labels_trg = torch.argmax(logits_trg, dim=2)
-                self.aligner.update_src_centers(src_feat.detach(), pseudo_labels_src)
-                self.aligner.update_trg_centers(trg_feat.detach(), pseudo_labels_trg)
+                with torch.no_grad():
+                    lyap_magnitude = src_lyap.abs().mean()
+                    grad_scale = torch.exp(-lyap_magnitude)  # 混沌区域梯度衰减
 
-                loss_align = self.aligner.compute_alignment_loss()
+                for param in self.decoder.parameters():
+                    if param.grad is not None:
+                        param.grad *= grad_scale
 
-                loss = loss_cls + self.lambda_ctr * loss_ctr + self.lambda_align * loss_align
                 loss.backward()
+                nn.utils.clip_grad_norm_(self.decoder.parameters(), 1)
                 self.adaptation_optimizer.step()
 
                 epoch_ll += loss_cls.item()
-                epoch_ctr_loss += loss_ctr.item()
-                epoch_align_loss += loss_align.item()
                 epoch_loss += loss.item()
                 num_data += src_obs.size(0)
 
@@ -312,13 +348,11 @@ class ACSSM():
                 torch.save({
                     'epoch': epoch,
                     'dynamics_state_dict': self.dynamics.state_dict(),  # 冻结的主干
-                    'contrastive_state_dict': self.contrastive_learner.state_dict(),
-                    'aligner_state_dict': self.aligner.state_dict(),
                     'adaptation_optimizer_state_dict': self.adaptation_optimizer.state_dict(),
                 },
-                    f'./checkpoints/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}/{run_id}_{self.seed}_{self.noise_scale}/v2/adaptation_{epoch + 1}.pt')
+                    f'./checkpoints/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}/{run_id}_{self.seed}_{self.noise_scale}/v3/adaptation_{epoch + 1}.pt')
         log_df = pd.DataFrame(self.log_history)
-        csv_path = f"./adapttaion_logs/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}/{run_id}_{self.seed}_{self.noise_scale}/v2/adaptation_{epoch + 1}.csv"
+        csv_path = f"./adapttaion_logs/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}/{run_id}_{self.seed}_{self.noise_scale}/v3/adaptation_{epoch + 1}.csv"
         os.makedirs(os.path.dirname(csv_path), exist_ok=True)
         log_df.to_csv(csv_path, index=False)
         print(f"Training log saved to {csv_path}")
