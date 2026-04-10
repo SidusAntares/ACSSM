@@ -173,7 +173,7 @@ class ACSSM():
             log_dict["epoch"] = epoch
             self.log_history.append(log_dict)
 
-            if epoch > 100:
+            if (epoch + 1) % 50 == 0:
                 if not os.path.exists('./checkpoints'):
                     os.makedirs('./checkpoints')
                 torch.save({
@@ -299,7 +299,7 @@ class ACSSM():
             log_dict["epoch"] = epoch
             self.log_history.append(log_dict)
 
-            if epoch > 100:
+            if (epoch + 1) % 50 == 0:
                 if not os.path.exists('./checkpoints'):
                     os.makedirs('./checkpoints')
                 torch.save({
