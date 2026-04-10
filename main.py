@@ -8,6 +8,7 @@ import argparse
 from dataset import PixelSetData
 
 from lib.data_utils import load_data
+# from lib.data_utils_try import load_data
 from lib.utils import set_seed, count_parameters
 # from lib.amortized_control_ssm import ACSSM
 from lib.acssm import ACSSM
@@ -128,7 +129,7 @@ def main(args):
     # wandb.init(project="acssm", config=args, save_code=True, mode="offline",
     #            name=f'{args.problem_name}')
     #wandb sync同步日志
-    param = count_parameters(run.dynamics) + count_parameters(run.decoder) + count_parameters(run.dynamics)+ count_parameters(run.aligner) + count_parameters(run.contrastive_learner)
+    param = count_parameters(run.dynamics) #+ count_parameters(run.decoder) + count_parameters(run.gate)+ count_parameters(run.aligner) + count_parameters(run.contrastive_learner)
     print(f"# param of model: {param}")
     src_train_loader, src_test_loader, trg_train_loader, trg_test_loader = load_data(args)
     run.train_and_eval_adaptation(src_train_loader, src_test_loader, trg_train_loader, trg_test_loader)

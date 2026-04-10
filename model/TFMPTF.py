@@ -1,16 +1,13 @@
 import torch
 import torch.nn as nn
-import numpy as np
+import torch.fft as fft
 import math
-from scipy.signal import windows
+
 
 class TFMPTF(nn.Module):
     """
-    优化版 TFMPTF
-    优化点:
-        1. 向量化 _compute_tmptm，去除 Python 时间循环。
-        2. VMD 使用高斯窗平滑滤波，减少频谱泄露。
-        3. FMPTM 仅提取上三角特征，减少冗余。
+    GPU优化版 TFMPTF - 完全在GPU上运行
+    修复类型转换错误和混合精度问题
     """
 
     def __init__(self, args):
@@ -20,195 +17,194 @@ class TFMPTF(nn.Module):
         self.perm_dim = args.perm_dim
         self.num_groups = args.num_groups
         assert self.state_dim % self.num_groups == 0
-        self.state = self.state_dim // self.num_groups
+        self.state_per_group = self.state_dim // self.num_groups
 
-        self.matrix_num = 2
-
-        # 预计算阶乘，避免重复计算
+        # 预计算参数
         self.max_patterns = math.factorial(self.perm_dim)
-        self.tmptm_dim = self.max_patterns ** 2  # 576
+        self.tmptm_dim = self.max_patterns ** 2
         self.fmptm_dim = self.vmd_modes * (self.vmd_modes - 1) // 2
-        self.fact_cache = [math.factorial(i) for i in range(self.perm_dim)]
 
-        # 预计算排列模式的所有可能排序 (加速 Lehmer Code 计算)
-        # shape: [max_patterns, perm_dim]
-        all_perms = np.array(list(self._generate_permutations(self.perm_dim)))
-        self.register_buffer('perm_table', torch.tensor(all_perms, dtype=torch.long))
-        self.register_buffer("matrix_size", torch.tensor(self.max_patterns, dtype=torch.int))
+        # 修复1：将fact_cache改为整数类型
+        self.register_buffer('fact_cache',
+                             torch.tensor([math.factorial(i) for i in range(self.perm_dim)],
+                                          dtype=torch.long))  # long类型
 
+        # 预计算窗口索引（用于滑动窗口）
+        self.register_buffer('window_indices',
+                             torch.arange(self.perm_dim).unsqueeze(0))
 
-    def _generate_permutations(self, m):
-        """递归生成全排列"""
-        if m == 1:
-            yield (0,)
-        else:
-            for p in self._generate_permutations(m - 1):
-                for i in range(m):
-                    yield p[:i] + (m - 1,) + p[i:]
-
-    def _get_permutation_pattern_fast(self, windows_data):
+    def _vmd_decomposition_gpu(self, signals):
         """
-        向量化计算 Lehmer Code
+        GPU向量化VMD分解
         Args:
-            windows_data: np.array, shape [Num_Windows, m]
+            signals: [batch_size, num_groups, time_steps]
         Returns:
-            ids: np.array, shape [Num_Windows]
+            modes: [batch_size, num_groups, vmd_modes, time_steps]
         """
-        sort_indices = np.argsort(windows_data, axis=1)
-
-        ids = np.zeros(windows_data.shape[0], dtype=int)
-
-        for i in range(self.perm_dim):
-            if i < self.perm_dim - 1:
-                smaller_counts = np.sum(sort_indices[:, i:i+1] > sort_indices[:, i+1:], axis=1)
-                ids += smaller_counts * self.fact_cache[self.perm_dim - 1 - i]
-
-        return ids
-
-    def _vmd_decomposition(self, signal):
-        """
-        改进版 VMD (基于高斯窗的频域滤波)
-        """
+        batch_size, num_groups, T = signals.shape
         K = self.vmd_modes
-        N = len(signal)
-        if N < K * 2:
-            return np.tile(signal, (K, 1))
 
-        fft_signal = np.fft.fft(signal)
-        freqs = np.fft.fftfreq(N)
+        # FFT变换
+        fft_signal = fft.fft(signals, dim=2)  # [B, G, T]
 
-        modes = np.zeros((K, N))
+        # 创建频率轴
+        freqs = torch.fft.fftfreq(T, device=signals.device, dtype=torch.float32)  # [T]
 
-        # 使用高斯窗构建平滑的带通滤波器
-        # 宽度参数控制模态的带宽
+        # 创建高斯滤波器矩阵 [K, T]
         bandwidth = 1.0 / K
+        center_freqs = torch.linspace(-0.5, 0.5, K, device=signals.device, dtype=torch.float32)  # [K]
 
-        for k in range(K):
-            center_freq = (k - K / 2) / K  # 中心化频率分布
+        # 计算所有模态的滤波器
+        # [K, 1] - [1, T] -> [K, T]
+        dist = (freqs.unsqueeze(0) - center_freqs.unsqueeze(1)).abs()
+        filters = torch.exp(-0.5 * (dist / bandwidth) ** 2)  # [K, T]
 
-            dist = np.abs(freqs - center_freq)
-
-            mask = np.exp(-0.5 * (dist / bandwidth) ** 2)
-
-            # 归一化能量 (可选)
-            # mask /= np.sum(mask)
-
-            filtered_fft = fft_signal * mask
-            mode_k = np.real(np.fft.ifft(filtered_fft))
-            modes[k, :] = mode_k
+        # 应用滤波器并进行逆FFT
+        # [B, G, 1, T] * [1, 1, K, T] -> [B, G, K, T]
+        filtered_fft = fft_signal.unsqueeze(2) * filters.unsqueeze(0).unsqueeze(0)
+        modes = fft.ifft(filtered_fft, dim=3).real  # [B, G, K, T]
 
         return modes
 
-    def _compute_tmptm(self, modes):
+    def _compute_pattern_ids_vectorized(self, windows_data):
         """
-        向量化版 TMPTM 计算
+        向量化计算排列模式ID（Lehmer Code）
+        Args:
+            windows_data: [batch_size, num_groups, K, num_windows, perm_dim]
+        Returns:
+            pattern_ids: [batch_size, num_groups, K, num_windows]
         """
-        K, time_len = modes.shape
+        B, G, K, N, m = windows_data.shape
+
+        # 排序获取索引 [B, G, K, N, m]
+        sorted_indices = windows_data.argsort(dim=4)
+
+        # 计算Lehmer Code
+        # 对于每个位置，计算右侧比它小的元素个数
+        pattern_ids = torch.zeros(B, G, K, N, device=windows_data.device, dtype=torch.long)
+
+        for i in range(m - 1):
+            # 当前位置的索引 [B, G, K, N, 1]
+            curr_idx = sorted_indices[..., i:i + 1]
+            # 右侧所有位置的索引 [B, G, K, N, m-i-1]
+            right_indices = sorted_indices[..., i + 1:]
+
+            # 计算比当前元素小的数量
+            smaller_counts = (curr_idx > right_indices).sum(dim=4)  # [B, G, K, N]
+
+            # 修复2：使用in-place加法，确保类型一致
+            pattern_ids = pattern_ids + smaller_counts * self.fact_cache[m - 1 - i]
+
+        return pattern_ids
+
+    def _compute_tmptm_gpu(self, modes):
+        """
+        GPU向量化TMPTM计算
+        Args:
+            modes: [batch_size, num_groups, vmd_modes, time_steps]
+        Returns:
+            tmptm: [batch_size, num_groups, max_patterns^2]
+        """
+        B, G, K, T = modes.shape
         m = self.perm_dim
         max_patterns = self.max_patterns
 
-        tmptm = np.zeros((max_patterns, max_patterns))
+        # 创建滑动窗口
+        # 使用unfold创建窗口 [B, G, K, num_windows, m]
+        num_windows = T - m + 1
+        windows = modes.unfold(3, m, 1)  # [B, G, K, num_windows, m]
 
-        # 1. 构建滑动窗口矩阵 (使用 stride_tricks 避免内存复制)
-        # shape: [K, Num_Windows, m]
-        shape = (K, time_len - m + 1, m)
-        strides = (modes.strides[0], modes.strides[1], modes.strides[1])
-        windows_matrix = np.lib.stride_tricks.as_strided(modes, shape=shape, strides=strides)
+        # 计算所有窗口的pattern ID
+        pattern_ids = self._compute_pattern_ids_vectorized(windows)  # [B, G, K, num_windows]
 
-        # 2. 批量计算所有窗口、所有模态的 Pattern ID
-        # 重塑为 [K * Num_Windows, m] 进行计算
-        flat_windows = windows_matrix.reshape(-1, m)
-        flat_ids = self._get_permutation_pattern_fast(flat_windows)
+        # 计算转移矩阵
+        # 当前时刻和下一时刻的pattern ID
+        curr_ids = pattern_ids[..., :-1]  # [B, G, K, num_windows-1]
+        next_ids = pattern_ids[..., 1:]  # [B, G, K, num_windows-1]
 
-        # 3. 计算转移
-        num_windows = flat_ids.shape[0] // K
-        flat_ids = flat_ids.reshape(K, num_windows)
+        # 将二维索引映射到一维
+        # [B, G, K, N] -> [B, G, K, N]
+        linear_indices = curr_ids * max_patterns + next_ids
 
-        for k in range(K):
-            ids = flat_ids[k]
-            # 当前时刻 t 和下一时刻 t+1
-            curr_ids = ids[:-1]
-            next_ids = ids[1:]
+        # 使用one_hot和求和来统计转移次数
+        # [B, G, K, N, max_patterns^2]
+        one_hot = torch.nn.functional.one_hot(linear_indices, num_classes=max_patterns ** 2)
+        tmptm = one_hot.sum(dim=3).float()  # [B, G, K, max_patterns^2]
 
-            # 使用 numpy 的 bincount 进行快速直方图统计
-            # 将二维坐标 (row, col) 映射到一维 index = row * N + col
-            linear_indices = curr_ids * max_patterns + next_ids
-            counts = np.bincount(linear_indices, minlength=max_patterns**2)
+        # 对所有模态求和
+        tmptm = tmptm.sum(dim=2)  # [B, G, max_patterns^2]
 
-            tmptm += counts.reshape(max_patterns, max_patterns)
+        # 归一化
+        row_sums = tmptm.sum(dim=2, keepdim=True)  # [B, G, 1]
+        row_sums = row_sums.clamp(min=1.0)  # 避免除零
+        tmptm = tmptm / row_sums
 
-        # 4. 归一化
-        row_sums = tmptm.sum(axis=1, keepdims=True)
-        row_sums[row_sums == 0] = 1.0
-        return tmptm / row_sums
+        return tmptm
 
-    def _compute_fmptm(self, modes):
+    def _compute_fmptm_gpu(self, modes):
         """
-        精简版 FMPTM (只取上三角)
+        GPU向量化FMPTM计算
+        Args:
+            modes: [batch_size, num_groups, vmd_modes, time_steps]
+        Returns:
+            fmptm: [batch_size, num_groups, fmptm_dim]
         """
-        K = modes.shape[0]
-        energies = modes ** 2
+        B, G, K, T = modes.shape
 
-        try:
-            corr_matrix = np.corrcoef(energies)
-            corr_matrix = np.nan_to_num(corr_matrix, nan=0.0)
-        except:
-            corr_matrix = np.eye(K)
+        # 计算能量
+        energies = modes ** 2  # [B, G, K, T]
 
-        # 只提取上三角部分 (不含对角线，因为对角线恒为1，无信息量)
-        # 或者包含对角线，视具体需求而定
-        triu_indices = np.triu_indices(K, k=1)
-        return corr_matrix[triu_indices]
+        # 标准化
+        mean_energy = energies.mean(dim=3, keepdim=True)  # [B, G, K, 1]
+        std_energy = energies.std(dim=3, keepdim=True)  # [B, G, K, 1]
+        std_energy = std_energy.clamp(min=1e-8)
+        normalized_energies = (energies - mean_energy) / std_energy  # [B, G, K, T]
+
+        # 计算相关系数矩阵
+        # [B, G, K, T] @ [B, G, T, K] -> [B, G, K, K]
+        corr_matrix = torch.matmul(normalized_energies, normalized_energies.transpose(2, 3)) / T
+
+        # 提取上三角部分（不含对角线）
+        triu_mask = torch.triu(torch.ones(K, K, device=modes.device), diagonal=1).bool()
+
+        # 使用mask提取上三角
+        fmptm = corr_matrix[:, :, triu_mask].reshape(B, G, -1)  # [B, G, fmptm_dim]
+
+        return fmptm
 
     def forward(self, hidden_states):
+        """
+        Args:
+            hidden_states: [batch_size, time_steps, state_dim]
+        Returns:
+            dict with tmptm and fmptm features (float32)
+        """
         batch_size, time_steps, state_dim = hidden_states.shape
 
-        # 分离计算，避免内存爆炸
-        group_tmptm_list = []
-        group_fmptm_list = []
+        # 修复3：确保输入是float32
+        if hidden_states.dtype != torch.float32:
+            hidden_states = hidden_states.float()
 
-        # 分组处理
-        for g in range(self.num_groups):
-            start_idx = g * self.state
-            end_idx = start_idx + self.state
-            group_data = hidden_states[:, :, start_idx:end_idx]  # [B, T, 16]
+        # 重新排列为 [batch_size, num_groups, state_per_group, time_steps]
+        hidden_states = hidden_states.permute(0, 2, 1)  # [B, state_dim, T]
+        hidden_states = hidden_states.reshape(batch_size, self.num_groups, self.state_per_group, time_steps)
 
-            # 组内平均池化（在state维度）
-            group_pooled = group_data.mean(dim=2)  # [B, T]
+        # 组内平均池化 [B, G, T]
+        group_pooled = hidden_states.mean(dim=2)
 
-            batch_tmptm = []
-            batch_fmptm = []
+        # VMD分解 [B, G, K, T]
+        modes = self._vmd_decomposition_gpu(group_pooled)
 
-            # 对每个样本计算TFMPTF特征
-            for b in range(batch_size):
-                signal = group_pooled[b].detach().cpu().numpy()  # [T]
+        # 修复4：移除autocast，直接计算并确保输出为float32
+        # TFMPTF模块主要做FFT和统计计算，对精度要求较高，不需要混合精度
+        tmptm = self._compute_tmptm_gpu(modes)  # [B, G, 576]
+        fmptm = self._compute_fmptm_gpu(modes)  # [B, G, 6]
 
-                # VMD分解
-                modes = self._vmd_decomposition(signal)  # [vmd_modes, T]
-
-                # 计算TMPTM
-                tmptm = self._compute_tmptm(modes).flatten()  # [576]
-
-                # 计算FMPTM
-                fmptm_vec = self._compute_fmptm(modes)  # [6]
-
-                batch_tmptm.append(tmptm)
-                batch_fmptm.append(fmptm_vec)
-
-            # 转换为tensor
-            tmptm_tensor = torch.tensor(np.array(batch_tmptm),
-                                        dtype=torch.float32).to(hidden_states.device)
-            fmptm_tensor = torch.tensor(np.array(batch_fmptm),
-                                        dtype=torch.float32).to(hidden_states.device)
-
-            group_tmptm_list.append(tmptm_tensor.unsqueeze(1))  # [B, 1, 576]
-            group_fmptm_list.append(fmptm_tensor.unsqueeze(1))  # [B, 1, 6]
-
-        # 拼接所有组
-        group_tmptm = torch.cat(group_tmptm_list, dim=1)  # [B, 32, 576]
-        group_fmptm = torch.cat(group_fmptm_list, dim=1)  # [B, 32, 6]
+        # 确保输出是float32
+        tmptm = tmptm.float()
+        fmptm = fmptm.float()
 
         return {
-            'group_tmptm': group_tmptm,  # [B, 32, 576]
-            'group_fmptm': group_fmptm  # [B, 32, 6]
+            'group_tmptm': tmptm,  # [batch_size, num_groups, tmptm_dim]
+            'group_fmptm': fmptm  # [batch_size, num_groups, fmptm_dim]
         }

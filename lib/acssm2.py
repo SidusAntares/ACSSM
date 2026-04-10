@@ -5,9 +5,9 @@ import torch.nn as nn
 import pandas as pd
 from datetime import datetime
 
-from model.adaptation import ClassCenterAligner, TFMPTF_Projector, AttentionGate, GLUAttentionGate
-from model.moco import AdaMoCo
-from model import Decoder
+from model.adaptation import ClassCenterAligner, TFMPTF_Projector, AttentionGate
+from model.moco import AdaMoCo3D
+# from model import Decoder
 from model.TFMPTF import TFMPTF
 import torch.nn.functional as F
 
@@ -18,7 +18,7 @@ import lib.sde as sde
 from lib.losses import MSE_, GNLL_, BNLL_, CNLL_, F1_
 from lib.data_utils import adjust_obs_for_extrapolation
 from lib.utils import get_time
-
+from einops import rearrange
 
 def match(domain):
     if domain == 'france/30TXT/2017':
@@ -31,6 +31,35 @@ def match(domain):
         return 'AT1'
 
 
+class Decoder(nn.Module):
+    """ A sequence to sequence model with attention mechanism. """
+
+    def __init__(self, args, in_dim):
+        super().__init__()
+
+        self.dataset = args.dataset
+        self.task = args.task
+        self.ld = args.state_dim
+        self.in_dim = in_dim
+        self.od = args.out_dim
+
+        self.decoder = nn.Sequential(
+            nn.Linear(self.in_dim, self.in_dim),
+            nn.ReLU(),
+            nn.Linear(self.in_dim, self.od)  # od = num_classes
+        )
+
+    def forward(self, input):
+
+        if self.dataset == 'pendulum' and self.task == 'interpolation':
+            n, b, t, d = input.size()
+            input = rearrange(input, 'n b t d -> (n b t) d')
+            out = self.decoder(input)
+            out = rearrange(out, '(n b t) x y z -> n b t x y z', n=n, b=b, t=t)
+        else:
+            out = self.decoder(input)
+        return out
+
 class ACSSM():
     def __init__(self, args):
         super(ACSSM, self).__init__()
@@ -42,7 +71,7 @@ class ACSSM():
 
         self.dynamics = sde.LinearSDE(args)
         self.dynamics = self.dynamics.to(self.device)
-        self.decoder = Decoder(args).to(self.device)
+        self.decoder = Decoder(args, args.state_dim).to(self.device)
 
         self.source_name = match(args.source)
         self.target_name = match(args.target)
@@ -55,21 +84,11 @@ class ACSSM():
         self.mse_loss = nn.MSELoss()
         self.kl_loss = nn.KLDivLoss(reduction="mean")
 
-        # tfmptf
-        self.tfmptf = TFMPTF(args).to(self.device)
-
         # adaptation
         self.lambda_ctr = args.lambda_ctr
         self.lambda_align = args.lambda_align
         # self.momentum_classifier = Decoder(args).to(self.device)
-        self.gate = GLUAttentionGate(feature_dim=args.moco_dim).to(self.device)
-        self.tfmptf_projector = TFMPTF_Projector(
-            args,
-            input_tmptm_dim=576,
-            input_fmptm_dim=6,
-            output_dim=args.moco_dim,  # 128
-            num_groups=args.num_groups
-        ).to(self.device)
+
         self.aligner = ClassCenterAligner(
             num_classes=args.num_classes,
             feature_dim=args.moco_dim,
@@ -77,12 +96,13 @@ class ACSSM():
             momentum=args.center_momentum,
             alignment_weight=args.lambda_align
         ).to(self.device)
-        self.contrastive_learner = AdaMoCo(
+        self.contrastive_learner = AdaMoCo3D(
             feature_dim=args.moco_dim,  # 128
             num_classes=args.num_classes,
-            queue_size=args.queue_size,
+            queue_size=args.batch_size * 256,
             temperature=0.07,
-            momentum=args.moco_momentum
+            momentum=args.moco_momentum,
+            contrast_mode = 'group_wise'
         ).to(self.device)
 
         self.optimizer = torch.optim.AdamW(
@@ -90,7 +110,6 @@ class ACSSM():
             list(self.decoder.parameters()),
             lr=args.lr, weight_decay=args.wd)
         self.adaptation_optimizer = torch.optim.AdamW(
-            list(self.tfmptf_projector.parameters()) +
             list(self.contrastive_learner.parameters()) +
             list(self.aligner.parameters()) +
             list(self.decoder.parameters()),
@@ -129,11 +148,7 @@ class ACSSM():
 
                 hidden_states, L_alpha = self.dynamics(src_obs, src_times, src_valid, mask_obs, n_samples=3,
                                                        epoch=epoch)
-                with torch.no_grad():
-                    tfmptf_feat = self.tfmptf(hidden_states)
-                time_q, freq_q, _ = self.tfmptf_projector(tfmptf_feat)
-                feat = self.gate(time_q, freq_q)
-                mean = self.decoder(feat)
+                mean = self.decoder(hidden_states)
 
                 # Example loss
                 batch_len = truth.size(0)
@@ -208,7 +223,6 @@ class ACSSM():
             epoch_align_loss = 0
             num_data = 0
 
-            self.tfmptf_projector.train()
             self.contrastive_learner.train()
             self.aligner.train()
 
@@ -228,25 +242,18 @@ class ACSSM():
                 src_obs = self.add_noise(src_obs, trg_obs)
 
                 with torch.no_grad():
-                    hidden_states_src, L_alpha = self.dynamics(
+                    src_feat, L_alpha = self.dynamics(
                         src_obs, src_times, src_valid, mask_obs,
                         n_samples=3, epoch=None
                     )
-                    tfmptf_feat_src = self.tfmptf(hidden_states_src)
-                time_src, freq_src, _ = self.tfmptf_projector(tfmptf_feat_src)
-                src_feat = self.gate(time_src, freq_src)
-
                 with torch.no_grad():
-                    hidden_states_trg, _ = self.dynamics(
+                    trg_feat, _ = self.dynamics(
                         trg_obs, trg_times, trg_valid, None,
                         n_samples=3, epoch=None
                     )
-                    tfmptf_feat_trg = self.tfmptf(hidden_states_trg)
-                time_trg, freq_trg, _ = self.tfmptf_projector(tfmptf_feat_trg)
-                trg_feat = self.gate(time_trg, freq_trg)
 
                 # 对比损失
-                loss_ctr = self.contrastive_learner(
+                loss_ctr, _ = self.contrastive_learner(
                     fused_q=src_feat,
                     fused_k=trg_feat.detach(),
                     labels=src_labels
@@ -257,8 +264,8 @@ class ACSSM():
                 train_nll, _ = CNLL_(src_labels, logits_src)
                 loss_cls = train_nll  # + L_alpha
 
-                pseudo_labels_src = torch.argmax(logits_src, dim=1)
-                pseudo_labels_trg = torch.argmax(logits_trg, dim=1)
+                pseudo_labels_src = torch.argmax(logits_src, dim=2)
+                pseudo_labels_trg = torch.argmax(logits_trg, dim=2)
                 self.aligner.update_src_centers(src_feat.detach(), pseudo_labels_src)
                 self.aligner.update_trg_centers(trg_feat.detach(), pseudo_labels_trg)
 
@@ -337,11 +344,7 @@ class ACSSM():
             mask_obs = data['mask_obs'].to(self.device)
 
             hidden_states, L_alpha = self.dynamics(obs, obs_times, obs_valid, mask_obs, n_samples=32, epoch=None)
-            with torch.no_grad():
-                tfmptf_feat = self.tfmptf(hidden_states)
-            time_q, freq_q, _ = self.tfmptf_projector(tfmptf_feat)
-            feat = self.gate(time_q, freq_q)
-            mean = self.decoder(feat)
+            mean = self.decoder(hidden_states)
 
             batch_len = truth.size(0)
             eval_nll, eval_mse = CNLL_(labels, mean)
@@ -365,7 +368,6 @@ class ACSSM():
         num_data = 0
         num_batches = 0
 
-        self.tfmptf_projector.eval()
         self.decoder.eval()
 
         with torch.no_grad():
@@ -379,13 +381,7 @@ class ACSSM():
                 # ACSSM提取隐状态
                 hidden_states, _ = self.dynamics(obs, obs_times, obs_valid, mask_obs, n_samples=32, epoch=None)
 
-                # TFMPTF特征提取
-                tfmptf_feat = self.tfmptf(hidden_states)
-                time_feat, freq_feat, _ = self.tfmptf_projector(tfmptf_feat)
-
-                # 使用对齐模块的分类器
-                fused_feat = self.gate(time_feat, freq_feat)
-                logits = self.decoder(fused_feat)
+                logits = self.decoder(hidden_states)
 
                 num_data += obs.size(0)
                 eval_nll, eval_mse = CNLL_(labels, logits)
