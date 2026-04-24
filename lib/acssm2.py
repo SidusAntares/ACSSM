@@ -189,8 +189,8 @@ class ACSSM():
             self.log_history.append(log_dict)
 
             if (epoch + 1) % 50 == 0:
-                if not os.path.exists('./checkpoints'):
-                    os.makedirs('./checkpoints')
+                if not os.path.exists(f'./checkpoints/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}/{run_id}_{self.seed}_{self.noise_scale}/v2'):
+                    os.makedirs(f'./checkpoints/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}/{run_id}_{self.seed}_{self.noise_scale}/v2')
                 torch.save({
                     'epoch': epoch,
                     'dynamics_state_dict': self.dynamics.state_dict(),
@@ -244,18 +244,18 @@ class ACSSM():
                 with torch.no_grad():
                     src_feat, L_alpha = self.dynamics(
                         src_obs, src_times, src_valid, mask_obs,
-                        n_samples=3, epoch=None
+                        n_samples=1, epoch=None
                     )
                 with torch.no_grad():
                     trg_feat, _ = self.dynamics(
                         trg_obs, trg_times, trg_valid, None,
-                        n_samples=3, epoch=None
+                        n_samples=1, epoch=None
                     )
 
                 # 对比损失
                 loss_ctr, _ = self.contrastive_learner(
-                    fused_q=src_feat,
-                    fused_k=trg_feat.detach(),
+                    fused_q=src_feat[0],
+                    fused_k=trg_feat[0].detach(),
                     labels=src_labels
                 )
                 logits_src = self.decoder(src_feat)
@@ -266,6 +266,10 @@ class ACSSM():
 
                 pseudo_labels_src = torch.argmax(logits_src, dim=2)
                 pseudo_labels_trg = torch.argmax(logits_trg, dim=2)
+                src_feat = src_feat.view(-1, src_feat.size(-1))  # [B*T, C]
+                trg_feat = trg_feat.view(-1, trg_feat.size(-1))  # [B*T, C]
+                pseudo_labels_src = pseudo_labels_src.view(-1)  # [B*T]
+                pseudo_labels_trg = pseudo_labels_trg.view(-1)
                 self.aligner.update_src_centers(src_feat.detach(), pseudo_labels_src)
                 self.aligner.update_trg_centers(trg_feat.detach(), pseudo_labels_trg)
 
@@ -307,8 +311,8 @@ class ACSSM():
             self.log_history.append(log_dict)
 
             if (epoch + 1) % 50 == 0:
-                if not os.path.exists('./checkpoints'):
-                    os.makedirs('./checkpoints')
+                if not os.path.exists(f'./checkpoints/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}/{run_id}_{self.seed}_{self.noise_scale}/v2'):
+                    os.makedirs(f'./checkpoints/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}/{run_id}_{self.seed}_{self.noise_scale}/v2')
                 torch.save({
                     'epoch': epoch,
                     'dynamics_state_dict': self.dynamics.state_dict(),  # 冻结的主干

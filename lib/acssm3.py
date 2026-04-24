@@ -226,8 +226,8 @@ class ACSSM():
             self.log_history.append(log_dict)
 
             if (epoch + 1) % 50 == 0:
-                if not os.path.exists('./checkpoints'):
-                    os.makedirs('./checkpoints')
+                if not os.path.exists(f'./checkpoints/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}/{run_id}_{self.seed}_{self.noise_scale}/v3/'):
+                    os.makedirs(f'./checkpoints/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}/{run_id}_{self.seed}_{self.noise_scale}/v3/')
                 torch.save({
                     'epoch': epoch,
                     'dynamics_state_dict': self.dynamics.state_dict(),
@@ -259,8 +259,7 @@ class ACSSM():
             epoch_ll = 0
             epoch_mse = 0
             epoch_loss = 0
-            epoch_ctr_loss = 0
-            epoch_align_loss = 0
+            epoch_dyn_loss = 0
             num_data = 0
 
             for _, (src_data, trg_data) in enumerate(zip(src_train_loader, trg_train_loader)):
@@ -293,7 +292,7 @@ class ACSSM():
                     trg_lyap = self.dynamics.alphas[:, 1:] - self.dynamics.alphas[:, :-1]  # 目标域
                 dyn_loss = lyap_loss(src_lyap, trg_lyap, min_bins=8, max_bins=25)
                 with torch.no_grad():
-                    dyn_weight = 0.5 * (1 - torch.exp(-epoch / 10))
+                    dyn_weight = 0.5 * (1 - torch.exp(-torch.tensor(epoch / 10.0, device=self.device)))
 
                 logits_src = self.decoder(src_feat)
                 logits_trg = self.decoder(trg_feat)
@@ -315,6 +314,7 @@ class ACSSM():
 
                 epoch_ll += loss_cls.item()
                 epoch_loss += loss.item()
+                epoch_dyn_loss += dyn_loss.item()
                 num_data += src_obs.size(0)
 
             print('--------------[ {} || {} ]--------------'.format(epoch, self.n_epoch))
@@ -324,13 +324,11 @@ class ACSSM():
 
             log_dict = {
                 "train_nll": epoch_ll / num_data,
-                "train_ctr_loss": epoch_ctr_loss / num_data,
-                "train_align_loss": epoch_align_loss / num_data,
+                "train_dyn_loss": epoch_dyn_loss / num_data,
                 "train_loss": epoch_loss / num_data,
             }
-            print("Adaptation [Train  ] TOTAL : {:.6f} || CTR : {:.6f} || Align : {:.6f}".format(epoch_loss / num_data,
-                                                                                         epoch_ctr_loss / num_data,
-                                                                                         epoch_align_loss / num_data))
+            print("Adaptation [Train  ] TOTAL : {:.6f} || DYN : {:.6f}".format(epoch_loss / num_data,
+                                                                                         epoch_dyn_loss / num_data))
             print("Adaptation [Eval  ] ACC : {:.6f} || Macro F1 : {:.6f}".format(test_acc, test_f1))
 
             log_dict.update({
@@ -343,8 +341,8 @@ class ACSSM():
             self.log_history.append(log_dict)
 
             if (epoch + 1) % 50 == 0:
-                if not os.path.exists('./checkpoints'):
-                    os.makedirs('./checkpoints')
+                if not os.path.exists(f'./checkpoints/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}/{run_id}_{self.seed}_{self.noise_scale}/v3/'):
+                    os.makedirs(f'./checkpoints/{self.dataset}_{self.task}/{self.source_name}/{self.target_name}/{run_id}_{self.seed}_{self.noise_scale}/v3/')
                 torch.save({
                     'epoch': epoch,
                     'dynamics_state_dict': self.dynamics.state_dict(),  # 冻结的主干
